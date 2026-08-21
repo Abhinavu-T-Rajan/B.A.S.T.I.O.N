@@ -1,0 +1,48 @@
+# B.A.S.T.I.O.N. Configuration File
+# Behavioral Attack Surveillance & Threat Isolation Operating Network
+
+[storage]
+# Path to persistent SQLite database
+db_path = "~/.local/share/bastion/bastion.db"
+
+[detectors.brute_force]
+enabled = true
+threshold = 10
+window_seconds = 60
+
+[detectors.password_spray]
+enabled = true
+min_usernames = 3
+max_attempts_per_user = 3
+window_seconds = 120
+
+[detectors.enumeration]
+enabled = true
+threshold = 4
+window_seconds = 60
+
+[detectors.burst]
+enabled = true
+threshold = 5
+window_seconds = 5
+
+[risk]
+# Threat score thresholds (0-100)
+medium_threshold = 40
+high_threshold = 70
+critical_threshold = 85
+
+# Scoring weights
+failed_auth_weight = 5
+invalid_user_weight = 10
+burst_velocity_weight = 25
+brute_force_weight = 20
+password_spray_weight = 20
+enumeration_weight = 20
+max_attempts_weight = 20
+repeat_offender_weight = 15
+success_auth_weight = -10
+trusted_ip_discount = -100
+
+# Trusted/allowlisted IP addresses (forced score 0)
+trusted_ips = ["127.0.0.1", "::1", "localhost"]

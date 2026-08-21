@@ -1,26 +1,43 @@
-"""Unit and integration tests for the SentinelPipeline."""
+"""Unit and integration tests for the Sentinel/Aegis Pipeline."""
 
 from bastion.collector.ssh import SSHLogParser
 from bastion.detection.brute_force import BruteForceDetector, DetectionResult
+from bastion.detection.engine import DetectionEngine
+from bastion.models.actors import ThreatActorProfile
 from bastion.models.events import EventType, SecurityEvent
-from bastion.pipeline import SentinelPipeline
+from bastion.pipeline import SentinelPipeline, format_explainable_alert
+from bastion.risk.scorer import RiskEngine
+from bastion.storage.sqlite import SQLiteStorage
 
 
-def test_pipeline_event_and_alert_dispatch() -> None:
+def test_pipeline_multi_detection_risk_and_storage() -> None:
     events_received: list[SecurityEvent] = []
-    alerts_received: list[tuple[SecurityEvent, DetectionResult]] = []
+    alerts_received: list[tuple[SecurityEvent, ThreatActorProfile, list[DetectionResult]]] = []
 
     def on_event(e: SecurityEvent) -> None:
         events_received.append(e)
 
-    def on_alert(e: SecurityEvent, r: DetectionResult) -> None:
-        alerts_received.append((e, r))
+    def on_alert(
+        e: SecurityEvent,
+        p: ThreatActorProfile,
+        d: list[DetectionResult],
+    ) -> None:
+        alerts_received.append((e, p, d))
 
-    detector = BruteForceDetector(threshold=3, window_seconds=60)
+    storage = SQLiteStorage(":memory:")
+    detection_engine = DetectionEngine(
+        brute_force=BruteForceDetector(threshold=3, window_seconds=60),
+    )
+    risk_engine = RiskEngine()
+
     pipeline = SentinelPipeline(
-        detector=detector,
+        parser=SSHLogParser(),
+        engine=detection_engine,
+        risk_engine=risk_engine,
+        storage=storage,
         on_event=on_event,
         on_alert=on_alert,
+        alert_min_score=40,
     )
 
     log_stream = [
@@ -33,31 +50,61 @@ def test_pipeline_event_and_alert_dispatch() -> None:
     results = list(pipeline.process(log_stream))
 
     assert len(results) == 4
-    # Event 1: Auth failure
+    # Event 1
     assert results[0].event is not None
-    assert results[0].detection is not None
-    assert results[0].detection.detected is False
-    assert results[0].detection.event_count == 1
+    assert results[0].profile is not None
+    assert results[0].profile.threat_score == 5
 
-    # Event 2: Invalid user
+    # Event 2
     assert results[1].event is not None
-    assert results[1].detection is not None
-    assert results[1].detection.detected is False
-    assert results[1].detection.event_count == 2
+    assert results[1].profile is not None
+    # 10 (failures) + 10 (invalid_user) = 20
+    assert results[1].profile.threat_score == 20
 
     # Event 3: Non-security log line
     assert results[2].event is None
-    assert results[2].detection is None
+    assert results[2].profile is None
 
-    # Event 4: Third failure -> hits threshold 3
+    # Event 4: Hits brute force threshold
     assert results[3].event is not None
-    assert results[3].detection is not None
-    assert results[3].detection.detected is True
-    assert results[3].detection.event_count == 3
+    assert results[3].profile is not None
+    # 15 (failures) + 10 (invalid_user) + 20 (brute_force) = 45 -> score >= 40 triggers alert!
+    assert results[3].profile.threat_score == 45
+    assert results[3].is_alert is True
+    assert results[3].alert_message is not None
+    assert "🚨 THREAT DETECTED" in results[3].alert_message
+    assert "192.0.2.10" in results[3].alert_message
 
     assert len(events_received) == 3
     assert len(alerts_received) == 1
-    alert_event, alert_result = alerts_received[0]
-    assert alert_event.source_ip == "192.0.2.10"
-    assert alert_result.detected is True
-    assert alert_result.event_count == 3
+
+    # Verify storage persisted events and actor
+    stored_events = storage.get_events()
+    assert len(stored_events) == 3
+
+    actor = storage.get_threat_actor("192.0.2.10")
+    assert actor is not None
+    assert actor.threat_score == 45
+    assert "admin" in actor.usernames_targeted
+
+    storage.close()
+
+
+def test_format_explainable_alert() -> None:
+    event = SecurityEvent.now(
+        source_ip="198.51.100.23",
+        service=EventType.AUTH_FAILURE,
+        event_type=EventType.AUTH_FAILURE,
+    )
+    profile = ThreatActorProfile(
+        source_ip="198.51.100.23",
+        first_seen=event.timestamp,
+        last_seen=event.timestamp,
+        threat_score=87,
+        usernames_targeted={"admin", "root"},
+    )
+    alert = format_explainable_alert(event, profile, [])
+    assert "🚨 THREAT DETECTED" in alert
+    assert "198.51.100.23" in alert
+    assert "87 / 100" in alert
+    assert "Targeted Users: admin, root" in alert
