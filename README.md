@@ -5,6 +5,7 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Version: v0.1.3 (Guardian)](https://img.shields.io/badge/version-0.1.3%20(Guardian)-brightgreen.svg)]()
+[![Tests: 71 Passed](https://img.shields.io/badge/tests-71%20passed-brightgreen.svg)]()
 
 B.A.S.T.I.O.N. is an autonomous, explainable host-level **Intrusion Detection & Prevention System (IDS/IPS)** designed for Linux environments. It monitors live authentication telemetry, detects coordinated attack patterns, calculates multi-signal risk scores (0–100), and provides automated threat containment via `nftables` packet filtering without administrative lockout risks.
 
@@ -48,6 +49,21 @@ B.A.S.T.I.O.N. is an autonomous, explainable host-level **Intrusion Detection & 
                          │ • MockFirewallBackend   │ (Testing & non-root environments)
                          └─────────────────────────┘
 ```
+
+For complete technical documentation on the internal pipeline and subsystem interfaces, refer to the [System Architecture Guide](docs/architecture.md).
+
+---
+
+## Documentation
+
+- **[System Architecture](docs/architecture.md)**: Detailed breakdown of the pipeline, data structures, and subsystem contracts.
+- **[Threat Model & Security Analysis](docs/threat-model.md)**: Exhaustive analysis of host threats, parser boundaries, false positives, and fail-safe recovery controls.
+- **[Linux Deployment Guide](docs/deployment.md)**: Production deployment instructions, OpenSSH tuning, configuration hardening, and safe phase-by-phase rollout workflows.
+- **[Security Policy](SECURITY.md)**: Vulnerability disclosure guidelines, reporting channels, and remediation timelines.
+- **[Contributing Guide](CONTRIBUTING.md)**: Branching workflow (`main` / `development`), Conventional Commits, and test requirements.
+- **[Changelog](CHANGELOG.md)**: Full release history from `v0.1.0` through `v0.1.3`.
+- **[Code of Conduct](CODE_OF_CONDUCT.md)**: Community standards and enforcement policies.
+- **[License](LICENSE)**: Full text of the Apache License 2.0.
 
 ---
 
@@ -95,8 +111,8 @@ cd B.A.S.T.I.O.N
 python3 -m venv .venv
 source .venv/bin/activate
 
-# Install in editable mode
-pip install -e .
+# Install in editable mode with development dependencies
+pip install -e ".[dev]"
 ```
 
 ---
@@ -233,6 +249,14 @@ All 71 unit and integration tests validate log parsing, behavioral detection alg
 
 ---
 
+## Development & Branching Model
+
+- **`main`**: Production-ready, verified release tags.
+- **`development`**: Active integration branch for upcoming features and detector improvements.
+- See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution rules, code review expectations, and Conventional Commit requirements.
+
+---
+
 ## Roadmap & Release Progression
 
 - **v0.1.0 — Foundation**: Core architecture, SecurityEvent model, and brute force detection.
@@ -245,5 +269,5 @@ All 71 unit and integration tests validate log parsing, behavioral detection alg
 ---
 
 ## License
- 
+
 Apache License 2.0. See [LICENSE](LICENSE) for details.
