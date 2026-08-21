@@ -1,0 +1,76 @@
+# B.A.S.T.I.O.N. Configuration File
+# Behavioral Attack Surveillance & Threat Isolation Operating Network
+
+[storage]
+# Path to persistent SQLite database
+db_path = "~/.local/share/bastion/bastion.db"
+
+[detectors.brute_force]
+enabled = true
+threshold = 10
+window_seconds = 60
+
+[detectors.password_spray]
+enabled = true
+min_usernames = 3
+max_attempts_per_user = 3
+window_seconds = 120
+
+[detectors.enumeration]
+enabled = true
+threshold = 4
+window_seconds = 60
+
+[detectors.burst]
+enabled = true
+threshold = 5
+window_seconds = 5
+
+[risk]
+# Threat score thresholds (0-100)
+medium_threshold = 40
+high_threshold = 70
+critical_threshold = 85
+
+# Scoring weights
+failed_auth_weight = 5
+invalid_user_weight = 10
+burst_velocity_weight = 25
+brute_force_weight = 20
+password_spray_weight = 20
+enumeration_weight = 20
+max_attempts_weight = 20
+repeat_offender_weight = 15
+success_auth_weight = -10
+trusted_ip_discount = -100
+
+# Trusted/allowlisted IP addresses (forced score 0)
+trusted_ips = ["127.0.0.1", "::1", "localhost"]
+
+[response]
+# Response mode: dry_run, manual, automatic, disabled
+mode = "dry_run"
+
+# Firewall backend: nftables, mock
+backend = "nftables"
+
+# Action thresholds
+isolation_threshold = 85
+rate_limit_threshold = 60
+
+# Ban duration in seconds (900s = 15m, 3600s = 1h, 86400s = 24h)
+default_ban_duration_seconds = 900
+repeat_offender_ban_duration_seconds = 3600
+max_ban_duration_seconds = 86400
+
+# Subnet allowlist protected from isolation
+allowlist_cidrs = [
+    "127.0.0.0/8",
+    "::1/128",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+]
+
+# Dedicated nftables table namespace
+table_name = "bastion"

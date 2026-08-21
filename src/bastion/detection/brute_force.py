@@ -1,22 +1,30 @@
 from __future__ import annotations
+
 from collections import defaultdict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from typing import Any
+
 from bastion.models.events import EventType, SecurityEvent
 
 
 @dataclass(frozen=True, slots=True)
 class DetectionResult:
+    """Result of evaluating a security event against a behavioral detector."""
+
     detected: bool
     source_ip: str
     event_count: int
     threshold: int
     window_seconds: int
     reason: str | None = None
+    detector_name: str = "brute_force"
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class BruteForceDetector:
-    # Detect repeated authentication failures from a source IP.
+    """Detect repeated authentication failures from a source IP within a sliding window."""
+
     def __init__(
         self,
         *,
@@ -31,11 +39,10 @@ class BruteForceDetector:
 
         self.threshold = threshold
         self.window = timedelta(seconds=window_seconds)
-
         self._failures: dict[str, deque[datetime]] = defaultdict(deque)
 
     def evaluate(self, event: SecurityEvent) -> DetectionResult:
-        # Evaluate one security event.
+        """Evaluate one security event."""
         if event.event_type not in {
             EventType.AUTH_FAILURE,
             EventType.INVALID_USER,
@@ -46,6 +53,7 @@ class BruteForceDetector:
                 event_count=self._count_active(event.source_ip, event.timestamp),
                 threshold=self.threshold,
                 window_seconds=int(self.window.total_seconds()),
+                detector_name="brute_force",
             )
 
         timestamps = self._failures[event.source_ip]
@@ -66,6 +74,7 @@ class BruteForceDetector:
                 threshold=self.threshold,
                 window_seconds=int(self.window.total_seconds()),
                 reason="repeated authentication failures",
+                detector_name="brute_force",
             )
 
         return DetectionResult(
@@ -74,6 +83,7 @@ class BruteForceDetector:
             event_count=count,
             threshold=self.threshold,
             window_seconds=int(self.window.total_seconds()),
+            detector_name="brute_force",
         )
 
     def _count_active(
@@ -81,7 +91,7 @@ class BruteForceDetector:
         source_ip: str,
         current_time: datetime,
     ) -> int:
-        # Return active failure count for a source.
+        """Return active failure count for a source."""
         timestamps = self._failures[source_ip]
 
         self._expire_old_events(
@@ -97,7 +107,7 @@ class BruteForceDetector:
         timestamps: deque[datetime],
         current_time: datetime,
     ) -> None:
-        # Remove timestamps outside the detection window.
+        """Remove timestamps outside the detection window."""
         cutoff = current_time - self.window
 
         while timestamps and timestamps[0] < cutoff:
