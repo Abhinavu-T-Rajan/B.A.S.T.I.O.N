@@ -5,8 +5,10 @@ import sys
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from bastion import __version__
+from bastion.attack.registry import AttackRegistry
 from bastion.collector.journal import JournalCollector, JournalError
 from bastion.collector.ssh import SSHLogParser
 from bastion.config import BastionConfig, load_config
@@ -18,6 +20,10 @@ from bastion.detection.password_spray import PasswordSprayDetector
 from bastion.firewall.base import FirewallBackend
 from bastion.firewall.mock import MockFirewallBackend
 from bastion.firewall.nftables import NFTablesBackend
+from bastion.incidents.manager import IncidentManager
+from bastion.incidents.models import Incident, IncidentStatus
+from bastion.intelligence.manager import IOCManager
+from bastion.intelligence.models import IOCRecord, IOCStatus, IOCType, Provenance
 from bastion.models.actors import (
     ActorState,
     RecommendedAction,
@@ -26,8 +32,10 @@ from bastion.models.actors import (
 )
 from bastion.models.events import EventType, SecurityEvent, ServiceType
 from bastion.pipeline import SentinelPipeline
+from bastion.response.audit import ResponseAuditRecord
 from bastion.response.ban_manager import BanManager
 from bastion.response.engine import ResponseEngine
+from bastion.response.experimental import ExperimentalResponseCoordinator
 from bastion.response.models import (
     BanRecord,
     BanStatus,
@@ -38,6 +46,7 @@ from bastion.response.models import (
 from bastion.response.policy import PolicyConfig, PolicyEngine
 from bastion.risk.scorer import RiskEngine, RiskScoringConfig
 from bastion.storage.sqlite import SQLiteStorage
+from bastion.timeline.generator import TimelineGenerator
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -71,7 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--version",
         action="version",
-        version=f"B.A.S.T.I.O.N. v{__version__} (Guardian)",
+        version=f"B.A.S.T.I.O.N. v{__version__} (Oracle)",
     )
 
     subparsers = parser.add_subparsers(
@@ -98,14 +107,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--min-score",
         type=int,
         default=0,
-        help="Minimum threat score to display (default: 0).",
+        help="Filter actors with threat score >= min_score (default: 0).",
+    )
+    threats_parser.add_argument(
+        "--severity",
+        choices=["low", "medium", "high", "critical"],
+        help="Filter by severity level.",
     )
     threats_parser.add_argument(
         "--limit",
-        "-n",
         type=int,
         default=25,
-        help="Maximum number of actors to show (default: 25).",
+        help="Maximum number of actors to display (default: 25).",
     )
     threats_parser.set_defaults(handler=command_threats)
 
@@ -113,10 +126,11 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_parser = subparsers.add_parser(
         "inspect",
         parents=[common_parent],
-        help="Inspect full threat profile, forensic history, and ban status for an IP.",
+        help="Inspect forensic details and score factors for a specific IP.",
     )
     inspect_parser.add_argument(
         "source_ip",
+        type=str,
         help="The IP address to inspect.",
     )
     inspect_parser.set_defaults(handler=command_inspect)
@@ -125,716 +139,751 @@ def build_parser() -> argparse.ArgumentParser:
     bans_parser = subparsers.add_parser(
         "bans",
         parents=[common_parent],
-        help="List active or historical ban records.",
+        help="List active or historical host isolation bans.",
     )
     bans_parser.add_argument(
         "--all",
-        "-a",
         action="store_true",
-        help="Show all bans (including expired/unbanned/dry-run).",
+        help="Include expired and revoked bans.",
     )
     bans_parser.add_argument(
         "--limit",
-        "-n",
         type=int,
         default=50,
-        help="Maximum number of records to display (default: 50).",
+        help="Maximum bans to display (default: 50).",
     )
     bans_parser.set_defaults(handler=command_bans)
 
-    # 5. ban (manual)
+    # 5. ban
     ban_parser = subparsers.add_parser(
         "ban",
         parents=[common_parent],
-        help="Manually isolate/block an IP address.",
+        help="Manually isolate an IP address via the response engine.",
     )
     ban_parser.add_argument(
-        "source_ip",
+        "ip",
+        type=str,
         help="IP address to isolate.",
     )
     ban_parser.add_argument(
         "--duration",
-        "-d",
         type=int,
         default=900,
-        help="Ban duration in seconds (default: 900s = 15m).",
+        help="Ban duration in seconds (default: 900 / 15m).",
     )
     ban_parser.add_argument(
         "--permanent",
-        "-p",
         action="store_true",
-        help="Apply a permanent ban without expiration.",
+        help="Apply a permanent isolation ban.",
     )
     ban_parser.add_argument(
         "--reason",
-        "-r",
         type=str,
         default="Manual operator ban",
         help="Reason for manual isolation.",
     )
-    ban_parser.set_defaults(handler=command_manual_ban)
+    ban_parser.set_defaults(handler=command_ban)
 
-    # 6. unban (manual)
+    # 6. unban
     unban_parser = subparsers.add_parser(
         "unban",
         parents=[common_parent],
-        help="Release an active ban on an IP address.",
+        help="Release an active ban and unblock IP in firewall backend.",
     )
     unban_parser.add_argument(
-        "source_ip",
-        help="IP address to unban.",
+        "ip",
+        type=str,
+        help="IP address to unblock.",
     )
-    unban_parser.set_defaults(handler=command_manual_unban)
+    unban_parser.set_defaults(handler=command_unban)
 
     # 7. firewall
-    fw_parser = subparsers.add_parser(
+    firewall_parser = subparsers.add_parser(
         "firewall",
         parents=[common_parent],
-        help="Firewall subsystem management.",
+        help="Inspect or flush firewall tables and sets.",
     )
-    fw_sub = fw_parser.add_subparsers(dest="firewall_action", required=True)
-    fw_status = fw_sub.add_parser(
+    firewall_sub = firewall_parser.add_subparsers(
+        dest="firewall_action",
+        required=True,
+    )
+    fw_status = firewall_sub.add_parser(
         "status",
         parents=[common_parent],
-        help="Show firewall table status and active blocked set.",
+        help="Show firewall table rules and active blacklist sets.",
     )
     fw_status.set_defaults(handler=command_firewall_status)
-    fw_flush = fw_sub.add_parser(
+
+    fw_flush = firewall_sub.add_parser(
         "flush",
         parents=[common_parent],
-        help="Flush all bastion firewall rules and clear blacklists.",
+        help="Flush all B.A.S.T.I.O.N. firewall blacklist entries.",
     )
     fw_flush.set_defaults(handler=command_firewall_flush)
 
-    # 8. events
+    # 8. incident (Oracle v0.2.0-alpha)
+    incident_parser = subparsers.add_parser(
+        "incident",
+        parents=[common_parent],
+        help="Manage and inspect security incidents.",
+    )
+    inc_sub = incident_parser.add_subparsers(dest="incident_action", required=True)
+
+    inc_list = inc_sub.add_parser("list", parents=[common_parent], help="List security incidents.")
+    inc_list.add_argument("--status", choices=["open", "investigating", "contained", "resolved", "closed"])
+    inc_list.add_argument("--limit", type=int, default=25)
+    inc_list.set_defaults(handler=command_incident_list)
+
+    inc_inspect = inc_sub.add_parser("inspect", parents=[common_parent], help="Inspect an incident in detail.")
+    inc_inspect.add_argument("incident_id", type=str)
+    inc_inspect.set_defaults(handler=command_incident_inspect)
+
+    inc_update = inc_sub.add_parser("update", parents=[common_parent], help="Update incident status.")
+    inc_update.add_argument("incident_id", type=str)
+    inc_update.add_argument("--status", choices=["open", "investigating", "contained", "resolved", "closed"], required=True)
+    inc_update.add_argument("--notes", type=str, default="")
+    inc_update.set_defaults(handler=command_incident_update)
+
+    inc_create = inc_sub.add_parser("create", parents=[common_parent], help="Create a manual incident.")
+    inc_create.add_argument("--title", type=str, required=True)
+    inc_create.add_argument("--severity", choices=["low", "medium", "high", "critical"], default="medium")
+    inc_create.add_argument("--risk", type=int, default=50)
+    inc_create.add_argument("--actors", type=str, help="Comma-separated IP addresses.")
+    inc_create.add_argument("--summary", type=str, default="")
+    inc_create.set_defaults(handler=command_incident_create)
+
+    # 9. ioc (Oracle v0.2.0-alpha)
+    ioc_parser = subparsers.add_parser(
+        "ioc",
+        parents=[common_parent],
+        help="Manage local threat intelligence IOCs.",
+    )
+    ioc_sub = ioc_parser.add_subparsers(dest="ioc_action", required=True)
+
+    ioc_add = ioc_sub.add_parser("add", parents=[common_parent], help="Add a new IOC record.")
+    ioc_add.add_argument("--type", choices=["ip", "domain", "hash_md5", "hash_sha1", "hash_sha256", "username"], required=True)
+    ioc_add.add_argument("--value", type=str, required=True)
+    ioc_add.add_argument("--confidence", type=int, default=70)
+    ioc_add.add_argument("--source", type=str, default="operator")
+    ioc_add.add_argument("--tags", type=str, help="Comma-separated tags (e.g. ssh,bruteforce).")
+    ioc_add.add_argument("--notes", type=str, default="")
+    ioc_add.set_defaults(handler=command_ioc_add)
+
+    ioc_list = ioc_sub.add_parser("list", parents=[common_parent], help="List IOC records.")
+    ioc_list.add_argument("--type", choices=["ip", "domain", "hash_md5", "hash_sha1", "hash_sha256", "username"])
+    ioc_list.add_argument("--status", choices=["active", "revoked", "expired"])
+    ioc_list.add_argument("--limit", type=int, default=50)
+    ioc_list.set_defaults(handler=command_ioc_list)
+
+    ioc_search = ioc_sub.add_parser("search", parents=[common_parent], help="Search IOCs by value, tag, or notes.")
+    ioc_search.add_argument("query", type=str)
+    ioc_search.add_argument("--limit", type=int, default=50)
+    ioc_search.set_defaults(handler=command_ioc_search)
+
+    ioc_delete = ioc_sub.add_parser("delete", parents=[common_parent], help="Delete an IOC record.")
+    ioc_delete.add_argument("ioc_id", type=str)
+    ioc_delete.set_defaults(handler=command_ioc_delete)
+
+    # 10. timeline (Oracle v0.2.0-alpha)
+    timeline_parser = subparsers.add_parser(
+        "timeline",
+        parents=[common_parent],
+        help="Reconstruct chronological investigation timeline for an IP or incident.",
+    )
+    timeline_parser.add_argument("--ip", type=str, help="Source IP to generate timeline for.")
+    timeline_parser.add_argument("--incident", type=str, help="Incident ID to generate timeline for.")
+    timeline_parser.add_argument("--limit", type=int, default=50, help="Max entries to show.")
+    timeline_parser.set_defaults(handler=command_timeline)
+
+    # 11. attack / mitre (Oracle v0.2.0-alpha)
+    attack_parser = subparsers.add_parser(
+        "attack",
+        aliases=["mitre"],
+        parents=[common_parent],
+        help="View MITRE ATT&CK technique catalog and detector mappings.",
+    )
+    attack_parser.add_argument("technique_id", nargs="?", help="Optional technique ID to inspect (e.g. T1110.001).")
+    attack_parser.set_defaults(handler=command_attack)
+
+    # 12. events
     events_parser = subparsers.add_parser(
         "events",
         parents=[common_parent],
-        help="Query persisted security telemetry events.",
+        help="List raw normalized security events.",
     )
+    events_parser.add_argument("--ip", type=str, help="Filter by source IP.")
     events_parser.add_argument(
-        "--ip",
-        type=str,
-        help="Filter events by source IP address.",
+        "--type",
+        choices=["auth_failure", "auth_success", "invalid_user", "max_attempts_exceeded", "connection", "unknown"],
+        help="Filter by event type.",
     )
-    events_parser.add_argument(
-        "--limit",
-        "-n",
-        type=int,
-        default=50,
-        help="Maximum events to return (default: 50).",
-    )
+    events_parser.add_argument("--limit", type=int, default=50, help="Maximum events to display.")
     events_parser.set_defaults(handler=command_events)
 
-    # 9. stats
+    # 13. stats
     stats_parser = subparsers.add_parser(
         "stats",
         parents=[common_parent],
-        help="Display aggregated system intelligence metrics.",
+        help="Display aggregated threat intelligence metrics.",
     )
     stats_parser.set_defaults(handler=command_stats)
 
-    # 10. config
+    # 14. config
     config_parser = subparsers.add_parser(
         "config",
         parents=[common_parent],
-        help="Configuration inspection.",
+        help="Configuration inspection tools.",
     )
     config_sub = config_parser.add_subparsers(dest="config_action", required=True)
-    config_show = config_sub.add_parser(
-        "show",
-        parents=[common_parent],
-        help="Show active configuration.",
-    )
-    config_show.set_defaults(handler=command_config_show)
+    cfg_show = config_sub.add_parser("show", parents=[common_parent], help="Show active configuration.")
+    cfg_show.set_defaults(handler=command_config_show)
 
-    # 11. parse
+    # 15. parse
     parse_parser = subparsers.add_parser(
         "parse",
         parents=[common_parent],
-        help="Inspect and parse raw log lines into SecurityEvents.",
+        help="Parse and inspect a raw log line.",
     )
-    parse_parser.add_argument(
-        "log_text",
-        nargs="?",
-        help="A raw log string to parse.",
-    )
-    parse_parser.add_argument(
-        "--file",
-        "-f",
-        type=str,
-        help="Path to a log file to parse.",
-    )
+    parse_parser.add_argument("line", type=str, help="Log line to parse.")
     parse_parser.set_defaults(handler=command_parse)
 
-    # 12. test-detection
-    test_parser = subparsers.add_parser(
+    # 16. test-detection
+    test_det_parser = subparsers.add_parser(
         "test-detection",
         parents=[common_parent],
-        help="Run a local brute-force detector simulation.",
+        help="Run local deterministic brute-force simulation.",
     )
-    test_parser.add_argument(
-        "--attempts",
-        type=int,
-        default=12,
-        help="Number of simulated failed attempts (default: 12).",
-    )
-    test_parser.add_argument(
-        "--threshold",
-        type=int,
-        default=10,
-        help="Number of failures required for detection (default: 10).",
-    )
-    test_parser.add_argument(
-        "--window",
-        type=int,
-        default=60,
-        help="Detection window in seconds (default: 60).",
-    )
-    test_parser.set_defaults(handler=command_test_detection)
+    test_det_parser.add_argument("--attempts", type=int, default=12, help="Number of simulated attempts.")
+    test_det_parser.add_argument("--threshold", type=int, default=10, help="Detection threshold.")
+    test_det_parser.set_defaults(handler=command_test_detection)
 
-    # 13. monitor (sentinel/guardian)
+    # 17. monitor
     monitor_parser = subparsers.add_parser(
         "monitor",
-        aliases=["sentinel", "watch", "guardian"],
         parents=[common_parent],
-        help="Monitor SSH logs in real-time with threat scoring & active response.",
+        help="Monitor live journald logs or stdin with real-time IPS defense.",
     )
-    monitor_parser.add_argument(
-        "--units",
-        "-u",
-        nargs="+",
-        default=["ssh.service", "sshd.service"],
-        help="Systemd unit(s) to monitor (default: ssh.service sshd.service).",
-    )
-    monitor_parser.add_argument(
-        "--identifier",
-        type=str,
-        default="sshd",
-        help="Syslog identifier to filter (default: sshd).",
-    )
-    monitor_parser.add_argument(
-        "--follow",
-        "-F",
-        action="store_true",
-        help="Continuously stream live journal entries.",
-    )
-    monitor_parser.add_argument(
-        "--lines",
-        "-n",
-        type=int,
-        default=50,
-        help="Number of recent lines to inspect (default: 50).",
-    )
-    monitor_parser.add_argument(
-        "--since",
-        type=str,
-        help="Show entries since timestamp/relative time (e.g. '10m ago').",
-    )
-    monitor_parser.add_argument(
-        "--file",
-        type=str,
-        help="Read from a file instead of systemd-journald.",
-    )
-    monitor_parser.add_argument(
-        "--stdin",
-        action="store_true",
-        help="Read log lines directly from standard input.",
-    )
-    monitor_parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Force dry-run defense simulation (no firewall rules modified).",
-    )
-    monitor_parser.add_argument(
-        "--enforce",
-        action="store_true",
-        help="Enable active firewall enforcement (automatic isolation).",
-    )
-    monitor_parser.add_argument(
-        "--mode",
-        choices=["dry_run", "manual", "automatic", "disabled"],
-        help="Explicit response mode override.",
-    )
-    monitor_parser.add_argument(
-        "--no-db",
-        action="store_true",
-        help="Disable database persistence during monitoring.",
-    )
+    monitor_parser.add_argument("--follow", "-f", action="store_true", help="Continuously follow live journal logs.")
+    monitor_parser.add_argument("--lines", "-n", type=int, default=100, help="Number of existing lines to process.")
+    monitor_parser.add_argument("--stdin", action="store_true", help="Read log lines from standard input.")
+    monitor_parser.add_argument("--file", type=str, help="Read log lines from a file.")
+    monitor_parser.add_argument("--min-score", type=int, default=70, help="Minimum threat score to trigger alert display.")
+    monitor_parser.add_argument("--dry-run", action="store_true", help="Force response engine into dry-run mode.")
+    monitor_parser.add_argument("--enforce", action="store_true", help="Force response engine into automatic enforcement mode.")
+    monitor_parser.add_argument("--mode", choices=["dry_run", "manual", "automatic", "disabled"], help="Explicit response mode override.")
     monitor_parser.set_defaults(handler=command_monitor)
 
     return parser
 
 
-def _get_storage(args: argparse.Namespace, cfg: BastionConfig) -> SQLiteStorage:
-    """Resolve and initialize SQLite storage based on flags and config."""
-    db_path = getattr(args, "db", None) or cfg.storage.db_path
-    return SQLiteStorage(db_path=db_path)
-
-
-def _get_firewall_backend(args: argparse.Namespace, cfg: BastionConfig) -> FirewallBackend:
-    """Instantiate appropriate firewall backend."""
-    backend_name = getattr(args, "backend", None) or cfg.response.backend
-    if backend_name == "mock":
+def _get_firewall_backend(cfg: BastionConfig, backend_override: str | None = None) -> FirewallBackend:
+    """Instantiate appropriate firewall backend based on CLI flag or config."""
+    choice = backend_override or cfg.response.backend
+    if choice == "mock":
+        return MockFirewallBackend()
+    import shutil
+    if shutil.which("nft") is None:
+        return MockFirewallBackend()
+    try:
+        return NFTablesBackend(table_name=cfg.response.table_name)
+    except Exception:
         return MockFirewallBackend()
 
-    nft = NFTablesBackend(table_name=cfg.response.table_name)
-    if not nft.is_available():
-        # If nft is requested but unavailable, fall back to mock with warning
-        return MockFirewallBackend()
-    return nft
 
+# =====================================================================
+# CLI Command Handlers
+# =====================================================================
 
 def command_status(args: argparse.Namespace) -> int:
-    """Display current project status, storage statistics, and active detectors."""
+    """Show operational status and subsystem health."""
     cfg = load_config(args.config)
-    journal_avail = JournalCollector.is_available()
-    fw = _get_firewall_backend(args, cfg)
+    db_path = args.db or cfg.storage.db_path
+    storage = SQLiteStorage(db_path)
+    fw = _get_firewall_backend(cfg, args.backend)
+    stats = storage.get_stats()
 
-    print(f"B.A.S.T.I.O.N. v{__version__} (Guardian)")
-    print("Behavioral Attack Surveillance & Threat Isolation Operating Network")
-    print("=" * 65)
-    print("Status      : DEVELOPMENT (Guardian)")
-    print("Mode        : INTRUSION PREVENTION & THREAT ISOLATION")
-    print("Engine      : ONLINE")
-    print(f"Response    : {cfg.response.mode.upper()} (Threshold: {cfg.response.isolation_threshold}/100, Duration: {cfg.response.default_ban_duration_seconds}s)")
-    print(f"Firewall    : {fw.name.upper()} ({'AVAILABLE' if fw.is_available() else 'UNAVAILABLE'})")
-    print(f"Journald    : {'AVAILABLE' if journal_avail else 'UNAVAILABLE'}")
-    print(f"Config File : {cfg.loaded_from or 'Default in-memory'}")
-    print(f"Storage DB  : {args.db or cfg.storage.db_path}")
-
-    # Query DB stats if accessible
-    try:
-        storage = _get_storage(args, cfg)
-        stats = storage.get_stats()
-        print(f"Database    : ONLINE ({stats['total_events']} events, {stats['total_actors']} actors, {stats.get('active_bans', 0)} active bans)")
-        storage.close()
-    except Exception as exc:
-        print(f"Database    : ERROR ({exc})")
-
-    print(f"Detectors   : Brute-Force, Password Spray, Username Enumeration, Burst Velocity")
-    print(f"Protected   : {', '.join(cfg.response.allowlist_cidrs)}")
-    print("=" * 65)
-
-    return 0
-
-
-def command_bans(args: argparse.Namespace) -> int:
-    """List active or historical ban records."""
-    cfg = load_config(args.config)
-    storage = _get_storage(args, cfg)
-
-    status_filter = None if args.all else BanStatus.ACTIVE
-    bans = storage.list_bans(status=status_filter, limit=args.limit)
-    storage.close()
-
-    status_desc = "All Bans" if args.all else "Active Bans"
-    print(f"🛡️  B.A.S.T.I.O.N. Tracked Bans ({status_desc})")
-    print("=" * 95)
-
-    if not bans:
-        print("No ban records found.")
-        print("=" * 95)
-        return 0
-
-    header = f"{'BAN ID':<14} {'SOURCE IP':<18} {'SCORE':<7} {'STATUS':<12} {'ACTION':<20} {'EXPIRES (UTC)'}"
-    print(header)
-    print("-" * 95)
-
-    for b in bans:
-        exp_str = b.expires_at.strftime('%Y-%m-%d %H:%M:%S') if b.expires_at else "Permanent"
-        action_str = b.action.value.replace("_", " ").upper()
-        print(
-            f"{b.ban_id:<14} "
-            f"{b.source_ip:<18} "
-            f"{b.threat_score:>3}/100 "
-            f"[{b.status.value.upper():<10}] "
-            f"{action_str:<20} "
-            f"{exp_str}"
-        )
-
-    print("=" * 95)
-    print(f"Total: {len(bans)} ban record(s) displayed.")
-    return 0
-
-
-def command_manual_ban(args: argparse.Namespace) -> int:
-    """Manually apply a ban to an IP address."""
-    cfg = load_config(args.config)
-    storage = _get_storage(args, cfg)
-    fw = _get_firewall_backend(args, cfg)
-    ban_mgr = BanManager(storage=storage, firewall=fw)
-
-    duration = None if args.permanent else args.duration
-    record = ban_mgr.create_ban(
-        source_ip=args.source_ip,
-        reason=args.reason,
-        threat_score=100,
-        duration_seconds=duration,
-        action=ResponseAction.PERMANENT_BAN if args.permanent else ResponseAction.TEMPORARY_ISOLATION,
-        status=BanStatus.ACTIVE,
-        metadata={"manual": True},
-    )
-    storage.close()
-
-    dur_desc = "Permanent" if args.permanent else f"{args.duration}s"
-    print(f"🛡️  IP {args.source_ip} successfully isolated [{dur_desc}]. Ban ID: {record.ban_id}")
-    return 0
-
-
-def command_manual_unban(args: argparse.Namespace) -> int:
-    """Manually release a ban on an IP address."""
-    cfg = load_config(args.config)
-    storage = _get_storage(args, cfg)
-    fw = _get_firewall_backend(args, cfg)
-    ban_mgr = BanManager(storage=storage, firewall=fw)
-
-    success = ban_mgr.unban(args.source_ip)
-    storage.close()
-
-    if success:
-        print(f"✅ IP {args.source_ip} successfully released from isolation.")
-    else:
-        print(f"⚠️  No active ban found for IP {args.source_ip}, but firewall unblock command was issued.")
-    return 0
-
-
-def command_firewall_status(args: argparse.Namespace) -> int:
-    """Display firewall table and blocked set contents."""
-    cfg = load_config(args.config)
-    fw = _get_firewall_backend(args, cfg)
-
-    print("🛡️  B.A.S.T.I.O.N. Firewall Status")
-    print("=" * 60)
-    print(f"Backend Name : {fw.name.upper()}")
-    print(f"Available    : {'YES' if fw.is_available() else 'NO'}")
-    if isinstance(fw, NFTablesBackend):
-        print(f"Table Name   : inet {fw.table_name}")
-
-    blocked = fw.list_blocked_ips()
-    print(f"Blocked IPs  : {len(blocked)}")
-    print("-" * 60)
-    if blocked:
-        for ip in blocked:
-            print(f"  • {ip}")
-    else:
-        print("  • None currently in firewall blacklist set")
-    print("=" * 60)
-    return 0
-
-
-def command_firewall_flush(args: argparse.Namespace) -> int:
-    """Flush all firewall blacklist rules."""
-    cfg = load_config(args.config)
-    fw = _get_firewall_backend(args, cfg)
-    fw.flush()
-    print("✅ B.A.S.T.I.O.N. firewall blacklist rules successfully flushed.")
+    print("=" * 64)
+    print(f" B.A.S.T.I.O.N. Host Defense Engine v{__version__} (Oracle)")
+    print(f" Status      : DEVELOPMENT (Oracle v{__version__})")
+    print(f" Mode        : INTRUSION PREVENTION & THREAT ISOLATION")
+    print("=" * 64)
+    print(f" Database         : {db_path}")
+    print(f" Response Mode    : {cfg.response.mode.upper()}")
+    print(f" Firewall Backend : {fw.name} ({'Available' if fw.is_available() else 'Unavailable'})")
+    print(f" Total Events     : {stats['total_events']}")
+    print(f" Detections       : {stats['total_detections']}")
+    print(f" Threat Actors    : {stats['total_threat_actors']} ({stats['active_threats']} active high/critical)")
+    print(f" Active Bans      : {stats['active_bans']}")
+    print(f" Active IOCs      : {stats['active_iocs']}")
+    print(f" Open Incidents   : {stats['open_incidents']}")
+    print("=" * 64)
     return 0
 
 
 def command_threats(args: argparse.Namespace) -> int:
     """List tracked threat actors and risk scores."""
     cfg = load_config(args.config)
-    storage = _get_storage(args, cfg)
+    db_path = args.db or cfg.storage.db_path
+    storage = SQLiteStorage(db_path)
 
-    actors = storage.list_threat_actors(min_score=args.min_score, limit=args.limit)
-    storage.close()
-
-    print(f"🛡️  B.A.S.T.I.O.N. Tracked Threat Actors (min score: {args.min_score})")
-    print("=" * 90)
+    sev_enum = Severity(args.severity.lower()) if args.severity else None
+    actors = storage.list_threat_actors(min_score=args.min_score, severity=sev_enum, limit=args.limit)
 
     if not actors:
-        print("No threat actors recorded in database.")
-        print("=" * 90)
+        print("No threat actors matching criteria.")
         return 0
 
-    header = f"{'SOURCE IP':<18} {'SCORE':<7} {'SEVERITY':<10} {'STATE':<14} {'FAILURES':<10} {'ACTION':<20}"
-    print(header)
-    print("-" * 90)
-
+    print(f"{'SOURCE IP':<18} {'SCORE':<7} {'SEVERITY':<10} {'STATE':<14} {'FAILURES':<10} {'ACTION':<20} {'LAST SEEN'}")
+    print("-" * 105)
     for a in actors:
-        action_str = a.recommended_action.value.replace("_", " ").upper()
-        print(
-            f"{a.source_ip:<18} "
-            f"{a.threat_score:>3}/100 "
-            f"[{a.severity.value.upper():<8}] "
-            f"{a.state.value:<14} "
-            f"{a.auth_failures:<10} "
-            f"{action_str:<20}"
-        )
-
-    print("=" * 90)
-    print(f"Total: {len(actors)} threat actor(s) displayed.")
+        last_str = a.last_seen.strftime("%Y-%m-%d %H:%M:%S")
+        print(f"{a.source_ip:<18} {a.threat_score:<7} {a.severity.value.upper():<10} {a.state.value:<14} {a.auth_failures:<10} {a.recommended_action.value:<20} {last_str}")
     return 0
 
 
 def command_inspect(args: argparse.Namespace) -> int:
-    """Display forensic threat actor profile, ban status, and contributing factors."""
+    """Inspect forensic details and score factors for a specific IP."""
     cfg = load_config(args.config)
-    storage = _get_storage(args, cfg)
+    db_path = args.db or cfg.storage.db_path
+    storage = SQLiteStorage(db_path)
 
-    profile = storage.get_threat_actor(args.source_ip)
-    active_ban = storage.get_ban_by_ip(args.source_ip)
-    events = storage.get_events(source_ip=args.source_ip, limit=10)
-    storage.close()
-
-    if not profile:
-        print(f"No profile found for IP address: {args.source_ip}", file=sys.stderr)
+    actor = storage.get_threat_actor(args.source_ip)
+    if not actor:
+        print(f"No forensic record found for IP: {args.source_ip}")
         return 1
 
-    print("=" * 65)
-    print(f"THREAT PROFILE: {profile.source_ip}")
-    print("=" * 65)
-    print(f"First Seen        : {profile.first_seen.strftime('%Y-%m-%d %H:%M:%S UTC')}")
-    print(f"Last Seen         : {profile.last_seen.strftime('%Y-%m-%d %H:%M:%S UTC')}")
-    print(f"Total Events      : {profile.total_events}")
-    print(f"Auth Failures     : {profile.auth_failures}")
-    print(f"Auth Successes    : {profile.auth_successes}")
-    print(f"Services Targeted : {', '.join(sorted(profile.services_targeted)) or 'None'}")
-    print(f"Users Targeted    : {', '.join(sorted(profile.usernames_targeted)) or 'None'}")
-    print("-" * 65)
-    print(f"Threat Score      : {profile.threat_score} / 100")
-    print(f"Severity          : {profile.severity.value.upper()}")
-    print(f"State             : {profile.state.value.replace('_', ' ').upper()}")
-    print(f"Recommended Action: {profile.recommended_action.value.replace('_', ' ').upper()}")
+    ban = storage.get_ban_by_ip(args.source_ip)
+    matched_iocs = storage.lookup_active_iocs(IOCType.IP, args.source_ip)
 
-    if active_ban:
-        exp_str = active_ban.expires_at.strftime('%Y-%m-%d %H:%M:%S UTC') if active_ban.expires_at else "Permanent"
-        print(f"Active Ban ID     : {active_ban.ban_id} (Status: {active_ban.status.value.upper()}, Expires: {exp_str})")
+    print("=" * 64)
+    print(f" FORENSIC PROFILE: {actor.source_ip}")
+    print("=" * 64)
+    print(f" Actor ID         : {actor.actor_id}")
+    print(f" Threat Score     : {actor.threat_score} / 100")
+    print(f" Severity         : {actor.severity.value.upper()}")
+    print(f" State            : {actor.state.value.upper()}")
+    print(f" Recommended      : {actor.recommended_action.value.upper()}")
+    print(f" First Seen       : {actor.first_seen.isoformat()}")
+    print(f" Last Seen        : {actor.last_seen.isoformat()}")
+    print(f" Total Events     : {actor.total_events} ({actor.auth_failures} failures, {actor.auth_successes} successes)")
+    print(f" Targeted Users   : {', '.join(sorted(actor.usernames_targeted)) if actor.usernames_targeted else 'None'}")
+
+    if matched_iocs:
+        print("\n Matched Threat Intelligence IOCs:")
+        for ioc in matched_iocs:
+            print(f"   • [{ioc.ioc_id}] {ioc.ioc_type.value}:{ioc.value} ({ioc.confidence}% confidence, {ioc.source})")
+
+    if ban:
+        exp_str = ban.expires_at.isoformat() if ban.expires_at else "Permanent"
+        print(f"\n Active Ban ID    : {ban.ban_id} ({ban.action.value.upper()}, Status: {ban.status.value.upper()}, Expires: {exp_str})")
+
+    print("\n Contributing Score Factors:")
+    for f in actor.factors:
+        print(f"   • {f.description} (Delta: {f.score_delta})")
+    print("=" * 64)
+    return 0
+
+
+def command_bans(args: argparse.Namespace) -> int:
+    """List bans."""
+    cfg = load_config(args.config)
+    storage = SQLiteStorage(args.db or cfg.storage.db_path)
+    status_filter = None if args.all else BanStatus.ACTIVE
+    bans = storage.list_bans(status=status_filter, limit=args.limit)
+
+    if not bans:
+        print("No ban records found.")
+        return 0
+
+    print(f"{'BAN ID':<16} {'IP':<18} {'ACTION':<20} {'STATUS':<12} {'SCORE':<7} {'EXPIRES AT'}")
+    print("-" * 90)
+    for b in bans:
+        exp_str = b.expires_at.strftime("%Y-%m-%d %H:%M:%S") if b.expires_at else "PERMANENT"
+        print(f"{b.ban_id:<16} {b.source_ip:<18} {b.action.value:<20} {b.status.value:<12} {b.threat_score:<7} {exp_str}")
+    return 0
+
+
+def command_ban(args: argparse.Namespace) -> int:
+    """Manually isolate an IP."""
+    cfg = load_config(args.config)
+    storage = SQLiteStorage(args.db or cfg.storage.db_path)
+    fw = _get_firewall_backend(cfg, args.backend)
+    bm = BanManager(storage=storage, firewall=fw)
+
+    duration = None if args.permanent else args.duration
+    ban = bm.create_ban(
+        source_ip=args.ip,
+        reason=args.reason,
+        threat_score=100 if args.permanent else 85,
+        duration_seconds=duration,
+        action=ResponseAction.PERMANENT_BAN if args.permanent else ResponseAction.TEMPORARY_ISOLATION,
+    )
+    print(f"IP {ban.source_ip} successfully isolated (Ban ID: {ban.ban_id}, Status: {ban.status.value.upper()})")
+    return 0
+
+
+def command_unban(args: argparse.Namespace) -> int:
+    """Release an active ban."""
+    cfg = load_config(args.config)
+    storage = SQLiteStorage(args.db or cfg.storage.db_path)
+    fw = _get_firewall_backend(cfg, args.backend)
+    bm = BanManager(storage=storage, firewall=fw)
+
+    success = bm.unban(args.ip)
+    if success:
+        print(f"IP {args.ip} successfully released from isolation.")
+        return 0
+    print(f"No active ban found for IP: {args.ip}")
+    return 1
+
+
+def command_firewall_status(args: argparse.Namespace) -> int:
+    """Show firewall status."""
+    cfg = load_config(args.config)
+    fw = _get_firewall_backend(cfg, args.backend)
+    print("=" * 64)
+    print(" B.A.S.T.I.O.N. Firewall Status")
+    print("=" * 64)
+    print(f"Backend Name : {fw.name.upper()}")
+    print(f"Available    : {fw.is_available()}")
+    ips = fw.list_blocked_ips()
+    print(f"Blocked IPs ({len(ips)}):")
+    for ip in ips:
+        print(f"  • {ip}")
+    print("=" * 64)
+    return 0
+
+
+def command_firewall_flush(args: argparse.Namespace) -> int:
+    """Flush firewall blacklist."""
+    cfg = load_config(args.config)
+    fw = _get_firewall_backend(cfg, args.backend)
+    fw.flush()
+    print(f"B.A.S.T.I.O.N. firewall blacklist rules successfully flushed for backend: {fw.name.upper()}")
+    return 0
+
+
+def command_incident_list(args: argparse.Namespace) -> int:
+    """List security incidents."""
+    cfg = load_config(args.config)
+    storage = SQLiteStorage(args.db or cfg.storage.db_path)
+    mgr = IncidentManager(storage)
+    incidents = mgr.list_incidents(status=args.status, limit=args.limit)
+
+    if not incidents:
+        print("No incidents found.")
+        return 0
+
+    print(f"{'INCIDENT ID':<24} {'STATUS':<14} {'SEVERITY':<10} {'RISK':<6} {'TITLE':<32} {'LAST SEEN'}")
+    print("-" * 105)
+    for inc in incidents:
+        last_str = inc.last_seen.strftime("%Y-%m-%d %H:%M:%S")
+        print(f"{inc.incident_id:<24} {inc.status.value.upper():<14} {inc.severity.value.upper():<10} {inc.risk_score:<6} {inc.title:<32} {last_str}")
+    return 0
+
+
+def command_incident_inspect(args: argparse.Namespace) -> int:
+    """Inspect an incident."""
+    cfg = load_config(args.config)
+    storage = SQLiteStorage(args.db or cfg.storage.db_path)
+    mgr = IncidentManager(storage)
+    inc = mgr.get_incident(args.incident_id)
+
+    if not inc:
+        print(f"Incident '{args.incident_id}' not found.")
+        return 1
+
+    print("=" * 64)
+    print(f" INCIDENT: {inc.incident_id} [{inc.status.value.upper()}]")
+    print("=" * 64)
+    print(f" Title            : {inc.title}")
+    print(f" Severity         : {inc.severity.value.upper()}")
+    print(f" Risk Score       : {inc.risk_score} / 100")
+    print(f" First Seen       : {inc.first_seen.isoformat()}")
+    print(f" Last Seen        : {inc.last_seen.isoformat()}")
+    print(f" Related Actors   : {', '.join(inc.related_actors) if inc.related_actors else 'None'}")
+    print(f" Related Events   : {len(inc.related_events)} events linked")
+    print(f" Related IOCs     : {', '.join(inc.related_iocs) if inc.related_iocs else 'None'}")
+    print(f" ATT&CK Techniques: {', '.join(inc.attack_techniques) if inc.attack_techniques else 'None'}")
+    print(f" Summary          : {inc.summary}")
+    print("=" * 64)
+    return 0
+
+
+def command_incident_update(args: argparse.Namespace) -> int:
+    """Update incident status."""
+    cfg = load_config(args.config)
+    storage = SQLiteStorage(args.db or cfg.storage.db_path)
+    mgr = IncidentManager(storage)
+    inc = mgr.update_status(args.incident_id, status=args.status, notes=args.notes)
+    if not inc:
+        print(f"Incident '{args.incident_id}' not found.")
+        return 1
+    print(f"Updated incident {inc.incident_id} status to {inc.status.value.upper()}")
+    return 0
+
+
+def command_incident_create(args: argparse.Namespace) -> int:
+    """Create a manual incident."""
+    cfg = load_config(args.config)
+    storage = SQLiteStorage(args.db or cfg.storage.db_path)
+    mgr = IncidentManager(storage)
+    actors = [a.strip() for a in args.actors.split(",") if a.strip()] if args.actors else []
+
+    inc = mgr.create_incident(
+        title=args.title,
+        severity=Severity(args.severity.lower()),
+        risk_score=args.risk,
+        actors=actors,
+        summary=args.summary,
+    )
+    print(f"Created incident {inc.incident_id} ({inc.title})")
+    return 0
+
+
+def command_ioc_add(args: argparse.Namespace) -> int:
+    """Add an IOC record."""
+    cfg = load_config(args.config)
+    storage = SQLiteStorage(args.db or cfg.storage.db_path)
+    mgr = IOCManager(storage)
+    tags = [t.strip() for t in args.tags.split(",") if t.strip()] if args.tags else []
+
+    try:
+        ioc = mgr.add_ioc(
+            ioc_type=args.type,
+            value=args.value,
+            confidence=args.confidence,
+            source=args.source,
+            tags=tags,
+            notes=args.notes,
+        )
+        print(f"Added IOC [{ioc.ioc_id}] {ioc.ioc_type.value}:{ioc.value} (Confidence: {ioc.confidence}%)")
+        return 0
+    except ValueError as e:
+        print(f"Error adding IOC: {e}")
+        return 1
+
+
+def command_ioc_list(args: argparse.Namespace) -> int:
+    """List IOC records."""
+    cfg = load_config(args.config)
+    storage = SQLiteStorage(args.db or cfg.storage.db_path)
+    mgr = IOCManager(storage)
+    iocs = mgr.list_iocs(ioc_type=args.type, status=args.status, limit=args.limit)
+
+    if not iocs:
+        print("No IOC records found.")
+        return 0
+
+    print(f"{'IOC ID':<18} {'TYPE':<12} {'CONF':<6} {'STATUS':<8} {'VALUE':<32} {'TAGS'}")
+    print("-" * 90)
+    for ioc in iocs:
+        tags_str = ", ".join(ioc.tags) if ioc.tags else ""
+        print(f"{ioc.ioc_id:<18} {ioc.ioc_type.value:<12} {ioc.confidence:<6} {ioc.status.value:<8} {ioc.value:<32} {tags_str}")
+    return 0
+
+
+def command_ioc_search(args: argparse.Namespace) -> int:
+    """Search IOC records."""
+    cfg = load_config(args.config)
+    storage = SQLiteStorage(args.db or cfg.storage.db_path)
+    mgr = IOCManager(storage)
+    iocs = mgr.search(args.query, limit=args.limit)
+
+    if not iocs:
+        print(f"No IOC records matching '{args.query}'.")
+        return 0
+
+    print(f"Found {len(iocs)} matching IOCs:")
+    for ioc in iocs:
+        print(f"  • [{ioc.ioc_id}] {ioc.ioc_type.value}:{ioc.value} ({ioc.confidence}%) tags={ioc.tags}")
+    return 0
+
+
+def command_ioc_delete(args: argparse.Namespace) -> int:
+    """Delete an IOC record."""
+    cfg = load_config(args.config)
+    storage = SQLiteStorage(args.db or cfg.storage.db_path)
+    mgr = IOCManager(storage)
+    if mgr.delete_ioc(args.ioc_id):
+        print(f"Deleted IOC {args.ioc_id}")
+        return 0
+    print(f"IOC {args.ioc_id} not found.")
+    return 1
+
+
+def command_timeline(args: argparse.Namespace) -> int:
+    """Reconstruct investigation timeline."""
+    cfg = load_config(args.config)
+    storage = SQLiteStorage(args.db or cfg.storage.db_path)
+    gen = TimelineGenerator(storage)
+
+    if args.incident:
+        entries = gen.generate_for_incident(args.incident, limit=args.limit)
+    elif args.ip:
+        entries = gen.generate_for_ip(args.ip, limit=args.limit)
     else:
-        print("Active Ban Status : NOT CURRENTLY BANNED")
+        print("Please specify either --ip <IP> or --incident <ID>")
+        return 1
 
-    print("-" * 65)
-    print("Contributing Score Factors:")
-    if profile.factors:
-        for f in profile.factors:
-            print(f"  • {f.description}")
-    else:
-        print("  • No explicit factors recorded")
+    if not entries:
+        print("No timeline entries found.")
+        return 0
 
-    if events:
-        print("-" * 65)
-        print("Recent Events Timeline (up to 10):")
-        for ev in events:
-            u_str = f" user={ev.username}" if ev.username else ""
-            print(f"  [{ev.timestamp.strftime('%H:%M:%S')}] {ev.event_type.value.upper():<14} {ev.service.value.upper()}{u_str}")
+    print(f"{'TIMESTAMP':<22} {'TYPE':<16} {'SOURCE':<18} {'SUMMARY'}")
+    print("-" * 90)
+    for e in entries:
+        ts_str = e.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+        print(f"{ts_str:<22} {e.entry_type.value.upper():<16} {e.source:<18} {e.summary}")
+    return 0
 
-    print("=" * 65)
+
+def command_attack(args: argparse.Namespace) -> int:
+    """View MITRE ATT&CK techniques."""
+    if args.technique_id:
+        tech = AttackRegistry.get_technique(args.technique_id)
+        if not tech:
+            print(f"Technique '{args.technique_id}' not found in registry.")
+            return 1
+        print("=" * 64)
+        print(f" MITRE ATT&CK: {tech.technique_id} - {tech.name}")
+        print("=" * 64)
+        print(f" Tactic      : {tech.tactic.value}")
+        print(f" URL         : {tech.url}")
+        print(f" Description : {tech.description}")
+        print("=" * 64)
+        return 0
+
+    print("=" * 64)
+    print(" MITRE ATT&CK Technique Catalog")
+    print("=" * 64)
+    print(f"{'TECHNIQUE ID':<16} {'TACTIC':<22} {'NAME'}")
+    print("-" * 75)
+    for t in AttackRegistry.list_techniques():
+        print(f"{t.technique_id:<16} {t.tactic.value:<22} {t.name}")
+    print("=" * 64)
     return 0
 
 
 def command_events(args: argparse.Namespace) -> int:
-    """Query stored security events from database."""
+    """List raw events."""
     cfg = load_config(args.config)
-    storage = _get_storage(args, cfg)
-
-    events = storage.get_events(source_ip=args.ip, limit=args.limit)
-    storage.close()
-
-    print(f"📋 B.A.S.T.I.O.N. Telemetry Events (Limit: {args.limit})")
-    print("=" * 80)
+    storage = SQLiteStorage(args.db or cfg.storage.db_path)
+    ev_type = EventType(args.type) if args.type else None
+    events = storage.get_events(source_ip=args.ip, event_type=ev_type, limit=args.limit)
 
     if not events:
-        print("No telemetry events found matching query.")
-        print("=" * 80)
+        print("No events found.")
         return 0
 
-    print(f"{'TIMESTAMP':<20} {'TYPE':<16} {'IP':<16} {'SERVICE':<8} {'USER'}")
+    print(f"{'TIMESTAMP':<22} {'SOURCE IP':<18} {'SERVICE':<8} {'TYPE':<22} {'USER'}")
     print("-" * 80)
-
     for ev in events:
-        u_str = ev.username or "-"
-        print(
-            f"{ev.timestamp.strftime('%Y-%m-%d %H:%M:%S'):<20} "
-            f"{ev.event_type.value:<16} "
-            f"{ev.source_ip:<16} "
-            f"{ev.service.value:<8} "
-            f"{u_str}"
-        )
-
-    print("=" * 80)
-    print(f"Returned {len(events)} event(s).")
+        ts_str = ev.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+        print(f"{ts_str:<22} {ev.source_ip:<18} {ev.service.value:<8} {ev.event_type.value:<22} {ev.username or ''}")
     return 0
 
 
 def command_stats(args: argparse.Namespace) -> int:
-    """Display overall system threat intelligence statistics."""
+    """Display system statistics."""
     cfg = load_config(args.config)
-    storage = _get_storage(args, cfg)
+    storage = SQLiteStorage(args.db or cfg.storage.db_path)
     stats = storage.get_stats()
-    storage.close()
 
-    print("📊 B.A.S.T.I.O.N. Intelligence Statistics")
-    print("=" * 50)
-    print(f"Total Telemetry Events    : {stats['total_events']}")
-    print(f"Total Behavioral Alerts   : {stats['total_detections']}")
-    print(f"Tracked Threat Actors     : {stats['total_actors']}")
-    print(f"Active High/Critical Risks: {stats['active_threats']}")
-    print(f"Active Firewall Bans      : {stats.get('active_bans', 0)}")
-    print("-" * 50)
+    print("=" * 64)
+    print(" B.A.S.T.I.O.N. System Intelligence Summary")
+    print("=" * 64)
+    print(f" Total Events Recorded   : {stats['total_events']}")
+    print(f" Triggered Detections    : {stats['total_detections']}")
+    print(f" Tracked Threat Actors   : {stats['total_threat_actors']} ({stats['active_threats']} active high/critical)")
+    print(f" Active Bans             : {stats['active_bans']}")
+    print(f" Active IOCs             : {stats['active_iocs']}")
+    print(f" Open Incidents          : {stats['open_incidents']}")
+    print(f" Audited Response Actions: {stats['total_response_audits']}")
 
-    print("Top Targeted Usernames:")
     if stats["top_targeted_usernames"]:
+        print("\n Top Targeted Usernames:")
         for u in stats["top_targeted_usernames"]:
-            print(f"  • {u['username']:<15} : {u['count']} attempts")
-    else:
-        print("  • None recorded")
+            print(f"   • {u['username']:<16} ({u['count']} attempts)")
 
-    print("\nTop Threat Actors:")
-    if stats["top_threats"]:
-        for t in stats["top_threats"]:
-            print(f"  • {t['source_ip']:<15} : Score {t['threat_score']:>3}/100 [{t['severity'].upper()}] ({t['failures']} failures)")
-    else:
-        print("  • None recorded")
-
-    print("=" * 50)
+    if stats["top_threat_actors"]:
+        print("\n Top Threat Actors by Score:")
+        for a in stats["top_threat_actors"]:
+            print(f"   • {a['source_ip']:<18} Score: {a['threat_score']:<3} ({a['severity'].upper()}) - {a['auth_failures']} failures")
+    print("=" * 64)
     return 0
 
 
 def command_config_show(args: argparse.Namespace) -> int:
-    """Display currently loaded configuration."""
+    """Show configuration."""
     cfg = load_config(args.config)
-    print(f"# B.A.S.T.I.O.N. Configuration (Source: {cfg.loaded_from or 'defaults'})")
-    print("-" * 50)
-    print(f"[storage]")
+    print("[storage]")
     print(f"db_path = \"{cfg.storage.db_path}\"")
-    print()
-    print("[detectors.brute_force]")
+    print("\n[detectors.brute_force]")
     print(f"enabled = {str(cfg.detectors.brute_force.enabled).lower()}")
     print(f"threshold = {cfg.detectors.brute_force.threshold}")
     print(f"window_seconds = {cfg.detectors.brute_force.window_seconds}")
-    print()
-    print("[detectors.password_spray]")
-    print(f"enabled = {str(cfg.detectors.password_spray.enabled).lower()}")
-    print(f"min_usernames = {cfg.detectors.password_spray.min_usernames}")
-    print(f"max_attempts_per_user = {cfg.detectors.password_spray.max_attempts_per_user}")
-    print(f"window_seconds = {cfg.detectors.password_spray.window_seconds}")
-    print()
-    print("[detectors.enumeration]")
-    print(f"enabled = {str(cfg.detectors.enumeration.enabled).lower()}")
-    print(f"threshold = {cfg.detectors.enumeration.threshold}")
-    print(f"window_seconds = {cfg.detectors.enumeration.window_seconds}")
-    print()
-    print("[detectors.burst]")
-    print(f"enabled = {str(cfg.detectors.burst.enabled).lower()}")
-    print(f"threshold = {cfg.detectors.burst.threshold}")
-    print(f"window_seconds = {cfg.detectors.burst.window_seconds}")
-    print()
-    print("[risk]")
-    print(f"medium_threshold = {cfg.risk.medium_threshold}")
-    print(f"high_threshold = {cfg.risk.high_threshold}")
-    print(f"critical_threshold = {cfg.risk.critical_threshold}")
-    print(f"trusted_ips = {cfg.risk.trusted_ips}")
-    print()
-    print("[response]")
+    print("\n[response]")
     print(f"mode = \"{cfg.response.mode}\"")
     print(f"backend = \"{cfg.response.backend}\"")
     print(f"isolation_threshold = {cfg.response.isolation_threshold}")
+    print(f"rate_limit_threshold = {cfg.response.rate_limit_threshold}")
     print(f"default_ban_duration_seconds = {cfg.response.default_ban_duration_seconds}")
+    print(f"repeat_offender_ban_duration_seconds = {cfg.response.repeat_offender_ban_duration_seconds}")
+    print(f"max_ban_duration_seconds = {cfg.response.max_ban_duration_seconds}")
     print(f"allowlist_cidrs = {cfg.response.allowlist_cidrs}")
-    print("-" * 50)
+    print(f"table_name = \"{cfg.response.table_name}\"")
     return 0
 
 
 def command_parse(args: argparse.Namespace) -> int:
-    """Parse log text or a log file into structured SecurityEvents."""
+    """Parse log line."""
     parser = SSHLogParser()
-
-    lines: list[str] = []
-    if args.log_text:
-        lines.append(args.log_text)
-    elif args.file:
-        try:
-            with open(args.file, encoding="utf-8") as f:
-                lines = [line.strip() for line in f if line.strip()]
-        except OSError as exc:
-            print(f"Error opening file '{args.file}': {exc}", file=sys.stderr)
-            return 1
-    else:
-        print("Error: Specify a log string to parse or use --file <path>", file=sys.stderr)
+    event = parser.parse(args.line)
+    if not event:
+        print("Unrecognized log format.")
         return 1
-
-    parsed_count = 0
-    for line in lines:
-        event = parser.parse(line)
-        print("-" * 60)
-        print(f"RAW: {line}")
-        if event is None:
-            print("STATUS: [IGNORED / UNMATCHED]")
-        else:
-            parsed_count += 1
-            print("STATUS: [PARSED]")
-            print(f"  Timestamp : {event.timestamp.isoformat()}")
-            print(f"  Source IP : {event.source_ip}")
-            print(f"  Service   : {event.service.value}")
-            print(f"  Type      : {event.event_type.value}")
-            print(f"  User      : {event.username or '<None>'}")
-            if event.metadata:
-                print(f"  Metadata  : {event.metadata}")
-
-    print("-" * 60)
-    print(f"Parsed {parsed_count} / {len(lines)} line(s).")
+    print(f"Parsed Event: {event}")
     return 0
 
 
 def command_test_detection(args: argparse.Namespace) -> int:
-    """Run a deterministic local detector simulation."""
-    if args.attempts <= 0:
-        raise SystemExit("--attempts must be greater than zero")
-
-    detector = BruteForceDetector(
-        threshold=args.threshold,
-        window_seconds=args.window,
-    )
-    source_ip = "192.0.2.10"
-
-    print("B.A.S.T.I.O.N. Detection Test")
-    print("=" * 40)
-
-    result: DetectionResult | None = None
+    """Run local brute-force simulation."""
+    detector = BruteForceDetector(threshold=args.threshold, window_seconds=60)
+    print(f"Simulating {args.attempts} failed logins against threshold {args.threshold}...")
+    now = datetime.now(timezone.utc)
     for i in range(1, args.attempts + 1):
-        event = SecurityEvent.now(
-            source_ip=source_ip,
+        ev = SecurityEvent(
+            timestamp=now,
+            source_ip="198.51.100.23",
             service=ServiceType.SSH,
             event_type=EventType.AUTH_FAILURE,
             username="root",
         )
-        result = detector.evaluate(event)
-        flag = "[ALERT DETECTED]" if result.detected else "[OK]"
-        print(f"  Attempt {i:02d}/{args.attempts:02d} -> Count: {result.event_count:02d}/{result.threshold} {flag}")
-
-    assert result is not None
-    print("=" * 40)
-    print(f"Source IP : {result.source_ip}")
-    print(f"Attempts  : {result.event_count}")
-    print(f"Threshold : {result.threshold}")
-    print(f"Window    : {result.window_seconds}s")
-    print(f"Detected  : {result.detected}")
-
-    if result.detected:
-        print(f"Reason    : {result.reason}")
-
+        res = detector.process(ev)
+        status_str = "🚨 DETECTED!" if res.detected else "OK"
+        print(f"Attempt {i:>2}/{args.attempts}: count={res.event_count} threshold={res.threshold} -> {status_str}")
     return 0
 
 
 def command_monitor(args: argparse.Namespace) -> int:
-    """Stream or scan logs through the pipeline with live risk scoring, persistence & defense response."""
+    """Monitor telemetry stream."""
     cfg = load_config(args.config)
-    storage = None if args.no_db else _get_storage(args, cfg)
-    firewall = _get_firewall_backend(args, cfg)
+    db_path = args.db or cfg.storage.db_path
+    storage = SQLiteStorage(db_path)
+    fw = _get_firewall_backend(cfg, args.backend)
 
-    # Resolve effective response mode
+    # Determine response mode
     if args.dry_run:
-        response_mode = ResponseMode.DRY_RUN
+        mode = ResponseMode.DRY_RUN
     elif args.enforce:
-        response_mode = ResponseMode.AUTOMATIC
+        mode = ResponseMode.AUTOMATIC
     elif args.mode:
-        response_mode = ResponseMode(args.mode)
+        mode = ResponseMode(args.mode.lower())
     else:
-        response_mode = ResponseMode(cfg.response.mode)
+        mode = ResponseMode(cfg.response.mode.lower())
 
-    # Initialize policy and ban manager
-    policy_config = PolicyConfig(
+    policy_cfg = PolicyConfig(
         isolation_threshold=cfg.response.isolation_threshold,
         rate_limit_threshold=cfg.response.rate_limit_threshold,
         default_ban_duration_seconds=cfg.response.default_ban_duration_seconds,
@@ -842,182 +891,60 @@ def command_monitor(args: argparse.Namespace) -> int:
         max_ban_duration_seconds=cfg.response.max_ban_duration_seconds,
         allowlist_cidrs=cfg.response.allowlist_cidrs,
     )
-    policy_engine = PolicyEngine(config=policy_config)
+    policy_engine = PolicyEngine(policy_cfg)
+    ban_manager = BanManager(storage=storage, firewall=fw)
+    response_engine = ResponseEngine(policy=policy_engine, ban_manager=ban_manager, default_mode=mode)
 
-    ban_manager = BanManager(
-        storage=storage or SQLiteStorage(":memory:"),
-        firewall=firewall,
-    )
-
-    # Recover state on startup if running in live enforcement
-    if response_mode == ResponseMode.AUTOMATIC:
-        restored = ban_manager.sync_on_startup()
-        if restored > 0:
-            print(f"[*] Restored {restored} active ban rule(s) in {firewall.name} firewall.")
-
-    response_engine = ResponseEngine(
-        policy=policy_engine,
-        ban_manager=ban_manager,
-        default_mode=response_mode,
-    )
-
-    # Initialize detectors from configuration
-    detection_engine = DetectionEngine(
-        brute_force=BruteForceDetector(
-            threshold=cfg.detectors.brute_force.threshold,
-            window_seconds=cfg.detectors.brute_force.window_seconds,
-        ),
-        password_spray=PasswordSprayDetector(
-            min_usernames=cfg.detectors.password_spray.min_usernames,
-            max_attempts_per_user=cfg.detectors.password_spray.max_attempts_per_user,
-            window_seconds=cfg.detectors.password_spray.window_seconds,
-        ),
-        enumeration=UsernameEnumerationDetector(
-            threshold=cfg.detectors.enumeration.threshold,
-            window_seconds=cfg.detectors.enumeration.window_seconds,
-        ),
-        burst=BurstDetector(
-            threshold=cfg.detectors.burst.threshold,
-            window_seconds=cfg.detectors.burst.window_seconds,
-        ),
-    )
-
-    # Initialize risk engine from configuration
-    risk_config = RiskScoringConfig(
-        failed_auth_weight=cfg.risk.failed_auth_weight,
-        invalid_user_weight=cfg.risk.invalid_user_weight,
-        burst_velocity_weight=cfg.risk.burst_velocity_weight,
-        brute_force_weight=cfg.risk.brute_force_weight,
-        password_spray_weight=cfg.risk.password_spray_weight,
-        enumeration_weight=cfg.risk.enumeration_weight,
-        max_attempts_weight=cfg.risk.max_attempts_weight,
-        repeat_offender_weight=cfg.risk.repeat_offender_weight,
-        success_auth_weight=cfg.risk.success_auth_weight,
-        trusted_ip_discount=cfg.risk.trusted_ip_discount,
-        medium_threshold=cfg.risk.medium_threshold,
-        high_threshold=cfg.risk.high_threshold,
-        critical_threshold=cfg.risk.critical_threshold,
-        trusted_ips=set(cfg.risk.trusted_ips),
-    )
-    risk_engine = RiskEngine(config=risk_config)
-
-    def on_alert(
-        event: SecurityEvent,
-        profile: ThreatActorProfile,
-        detections: list[DetectionResult],
-        decision: ResponseDecision | None = None,
-    ) -> None:
-        print("\n" + "=" * 65, file=sys.stderr)
-        print(f"🚨 THREAT DETECTED", file=sys.stderr)
-        print(f"Source      : {event.source_ip}", file=sys.stderr)
-        print(f"Score       : {profile.threat_score} / 100 [{profile.severity.value.upper()}]", file=sys.stderr)
-        print(f"State       : {profile.state.value.replace('_', ' ').upper()}", file=sys.stderr)
-        print("Contributing Factors:", file=sys.stderr)
-        for f in profile.factors:
-            print(f"  • {f.description}", file=sys.stderr)
-        if profile.usernames_targeted:
-            print(f"Users       : {', '.join(sorted(profile.usernames_targeted))}", file=sys.stderr)
-
-        if decision and decision.action in {ResponseAction.TEMPORARY_ISOLATION, ResponseAction.PERMANENT_BAN}:
-            dur_str = f"{decision.duration_seconds // 60}m" if decision.duration_seconds else "Permanent"
-            if decision.mode == ResponseMode.DRY_RUN:
-                action_text = f"WOULD BLOCK [DRY-RUN] ({dur_str})"
-            elif decision.mode == ResponseMode.AUTOMATIC:
-                action_text = f"ISOLATED [ENFORCED via {firewall.name}] ({dur_str})"
-            elif decision.mode == ResponseMode.MANUAL_APPROVAL:
-                action_text = f"PENDING OPERATOR APPROVAL ({dur_str})"
-            else:
-                action_text = "DISABLED"
-            print(f"Defense     : {action_text}", file=sys.stderr)
-        else:
-            print(f"Action      : {profile.recommended_action.value.replace('_', ' ').upper()} (ADVISORY)", file=sys.stderr)
-        print("=" * 65 + "\n", file=sys.stderr, flush=True)
+    det_engine = DetectionEngine()
+    risk_engine = RiskEngine()
 
     pipeline = SentinelPipeline(
-        parser=SSHLogParser(),
-        engine=detection_engine,
+        engine=det_engine,
         risk_engine=risk_engine,
         response_engine=response_engine,
         storage=storage,
-        on_alert=on_alert,
-        alert_min_score=cfg.risk.high_threshold,
+        alert_min_score=args.min_score,
     )
 
-    def get_stream() -> Iterator[str]:
+    print(f"Starting B.A.S.T.I.O.N. Guardian IPS Monitor...")
+    print(f"Response    : {mode.value.upper()}")
+    print(f"Backend     : {fw.name.upper()}")
+
+    def line_stream() -> Iterator[str]:
         if args.stdin:
             for line in sys.stdin:
-                cleaned = line.strip()
-                if cleaned:
-                    yield cleaned
+                yield line.strip()
         elif args.file:
-            with open(args.file, encoding="utf-8") as f:
+            with open(args.file, "r") as f:
                 for line in f:
-                    cleaned = line.strip()
-                    if cleaned:
-                        yield cleaned
+                    yield line.strip()
         else:
-            collector = JournalCollector(
-                units=args.units,
-                identifier=args.identifier,
-            )
-            if not collector.is_available():
-                print(
-                    "Error: journalctl is not available. Provide log input via --file or --stdin.",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-
+            collector = JournalCollector()
             if args.follow:
-                yield from collector.follow(lines=args.lines, since=args.since)
+                for line in collector.follow():
+                    yield line
             else:
-                yield from collector.read(lines=args.lines, since=args.since)
+                for line in collector.read_lines(lines=args.lines):
+                    yield line
 
-    print(f"🛡️  B.A.S.T.I.O.N. Guardian IPS Monitor v{__version__}")
-    print(f"Response    : {response_mode.value.upper()} (Firewall Backend: {firewall.name})")
-    print(f"Persistence : {'ENABLED (' + (args.db or cfg.storage.db_path) + ')' if storage else 'DISABLED'}")
-    print(f"Mode        : {'LIVE STREAM (follow)' if args.follow else 'BATCH SCAN'}")
-    print("Listening for telemetry... (Ctrl+C to stop)\n" + ("-" * 75))
+    for result in pipeline.process(line_stream()):
+        if result.is_alert and result.alert_message:
+            print("-" * 64)
+            print(result.alert_message)
+            print("-" * 64)
 
-    processed_lines = 0
-    security_events = 0
-
-    try:
-        for res in pipeline.process(get_stream()):
-            processed_lines += 1
-            if res.event is not None:
-                security_events += 1
-                status = f"[{res.event.event_type.value.upper()}]"
-                user = f"user={res.event.username}" if res.event.username else ""
-                score_str = f"Score={res.profile.threat_score:>2}/100 [{res.profile.severity.value[:4].upper()}]" if res.profile else ""
-                defense_str = ""
-                if res.decision and res.decision.action in {ResponseAction.TEMPORARY_ISOLATION, ResponseAction.PERMANENT_BAN}:
-                    tag = "WOULD-BLOCK" if res.decision.mode == ResponseMode.DRY_RUN else "BLOCKED"
-                    defense_str = f"-> [{tag}]"
-                print(
-                    f"{res.event.timestamp.strftime('%Y-%m-%d %H:%M:%S')} "
-                    f"{status:15} IP={res.event.source_ip:<15} {user:<18} {score_str} {defense_str}"
-                )
-    except KeyboardInterrupt:
-        print("\n[Guardian Stopped by User]")
-    except JournalError as exc:
-        print(f"\nCollector Error: {exc}", file=sys.stderr)
-        return 1
-    finally:
-        if storage:
-            storage.close()
-
-    print("-" * 75)
-    print(f"Summary: Processed {processed_lines} log entries -> {security_events} security events.")
     return 0
 
 
-def main() -> int:
-    """Execute the B.A.S.T.I.O.N. CLI."""
+def main(argv: list[str] | None = None) -> int:
+    """Main CLI entrypoint."""
     parser = build_parser()
-    args = parser.parse_args()
-
-    return args.handler(args)
+    args = parser.parse_args(argv)
+    if hasattr(args, "handler"):
+        return args.handler(args)
+    parser.print_help()
+    return 1
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())

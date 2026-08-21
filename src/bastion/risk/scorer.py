@@ -49,6 +49,7 @@ class RiskEngine:
         event: SecurityEvent,
         detections: Sequence[DetectionResult] = (),
         existing_profile: ThreatActorProfile | None = None,
+        matched_iocs: Sequence[Any] = (),
     ) -> ThreatActorProfile:
         """Evaluate a security event and detector signals to produce an updated ThreatActorProfile."""
         source_ip = event.source_ip
@@ -210,7 +211,19 @@ class RiskEngine:
             )
             raw_score += delta
 
-        # 6. Successful authentication deduction
+        # 6. Matched Threat Intelligence IOCs
+        for ioc in matched_iocs:
+            ioc_delta = max(15, min(30, int((ioc.confidence / 100.0) * 30)))
+            factors.append(
+                ScoreFactor(
+                    name="ioc_match",
+                    score_delta=ioc_delta,
+                    description=f"+{ioc_delta} matched active IOC ({ioc.ioc_type.value}:{ioc.value}) [Confidence: {ioc.confidence}%]",
+                )
+            )
+            raw_score += ioc_delta
+
+        # 7. Successful authentication deduction
         if event.event_type == EventType.AUTH_SUCCESS:
             delta = self.config.success_auth_weight
             factors.append(

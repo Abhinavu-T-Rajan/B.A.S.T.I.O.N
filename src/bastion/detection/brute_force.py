@@ -8,18 +8,8 @@ from typing import Any
 from bastion.models.events import EventType, SecurityEvent
 
 
-@dataclass(frozen=True, slots=True)
-class DetectionResult:
-    """Result of evaluating a security event against a behavioral detector."""
-
-    detected: bool
-    source_ip: str
-    event_count: int
-    threshold: int
-    window_seconds: int
-    reason: str | None = None
-    detector_name: str = "brute_force"
-    metadata: dict[str, Any] = field(default_factory=dict)
+from bastion.detection.base import DetectionResult
+from bastion.models.events import EventType, SecurityEvent
 
 
 class BruteForceDetector:

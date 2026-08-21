@@ -1,6 +1,6 @@
 # B.A.S.T.I.O.N. Linux Deployment Guide
 
-**Safe Deployment & Operational Hardening for Linux Hosts** (v0.1.3 "Guardian")
+**Safe Deployment & Operational Hardening for Linux Hosts** (v0.2.0-alpha "Oracle")
 
 ---
 

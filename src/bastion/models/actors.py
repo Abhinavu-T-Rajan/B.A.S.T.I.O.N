@@ -75,7 +75,7 @@ class ScoreFactor:
 
 @dataclass(slots=True)
 class ThreatActorProfile:
-    """Comprehensive behavioral and forensic profile of an IP address."""
+    """Comprehensive behavioral and forensic profile of an observed threat actor / IP."""
 
     source_ip: str
     first_seen: datetime
@@ -90,6 +90,11 @@ class ThreatActorProfile:
     state: ActorState = ActorState.NEUTRAL
     factors: list[ScoreFactor] = field(default_factory=list)
     recommended_action: RecommendedAction = RecommendedAction.NONE
+    actor_id: str = ""
+    observed_ips: set[str] = field(default_factory=set)
+    associated_iocs: list[str] = field(default_factory=list)
+    related_incidents: list[str] = field(default_factory=list)
+    provenance: str = "observed"
 
     def __post_init__(self) -> None:
         if self.first_seen.tzinfo is None:
@@ -99,6 +104,10 @@ class ThreatActorProfile:
         self.threat_score = max(0, min(100, self.threat_score))
         if self.severity == Severity.LOW and self.threat_score > 0:
             self.severity = Severity.from_score(self.threat_score)
+        if not self.actor_id:
+            self.actor_id = f"actor-{self.source_ip}"
+        if not self.observed_ips and self.source_ip:
+            self.observed_ips = {self.source_ip}
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize profile to a JSON-compatible dictionary."""
@@ -116,6 +125,11 @@ class ThreatActorProfile:
             "state": self.state.value,
             "factors": [f.to_dict() for f in self.factors],
             "recommended_action": self.recommended_action.value,
+            "actor_id": self.actor_id,
+            "observed_ips": sorted(self.observed_ips),
+            "associated_iocs": self.associated_iocs,
+            "related_incidents": self.related_incidents,
+            "provenance": self.provenance,
         }
 
     @classmethod
@@ -129,9 +143,11 @@ class ThreatActorProfile:
             last_seen = last_seen.replace(tzinfo=timezone.utc)
 
         factors = [ScoreFactor.from_dict(f) for f in data.get("factors", [])]
+        source_ip = data["source_ip"]
+        observed_ips = set(data.get("observed_ips", [source_ip]))
 
         return cls(
-            source_ip=data["source_ip"],
+            source_ip=source_ip,
             first_seen=first_seen,
             last_seen=last_seen,
             total_events=int(data.get("total_events", 0)),
@@ -146,4 +162,10 @@ class ThreatActorProfile:
             recommended_action=RecommendedAction(
                 data.get("recommended_action", RecommendedAction.NONE.value)
             ),
+            actor_id=data.get("actor_id", f"actor-{source_ip}"),
+            observed_ips=observed_ips,
+            associated_iocs=data.get("associated_iocs", []),
+            related_incidents=data.get("related_incidents", []),
+            provenance=data.get("provenance", "observed"),
         )
+
