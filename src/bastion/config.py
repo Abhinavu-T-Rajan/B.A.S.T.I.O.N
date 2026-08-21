@@ -76,12 +76,36 @@ class RiskConfig:
 
 
 @dataclass(slots=True)
+class ResponseConfig:
+    """Automated defense and firewall response configuration."""
+
+    mode: str = "dry_run"  # dry_run, manual, automatic, disabled
+    backend: str = "nftables"  # nftables, mock
+    isolation_threshold: int = 85
+    rate_limit_threshold: int = 60
+    default_ban_duration_seconds: int = 900
+    repeat_offender_ban_duration_seconds: int = 3600
+    max_ban_duration_seconds: int = 86400
+    allowlist_cidrs: list[str] = field(
+        default_factory=lambda: [
+            "127.0.0.0/8",
+            "::1/128",
+            "10.0.0.0/8",
+            "172.16.0.0/12",
+            "192.168.0.0/16",
+        ]
+    )
+    table_name: str = "bastion"
+
+
+@dataclass(slots=True)
 class BastionConfig:
     """Root configuration for B.A.S.T.I.O.N."""
 
     storage: StorageConfig = field(default_factory=StorageConfig)
     detectors: DetectorsConfig = field(default_factory=DetectorsConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
+    response: ResponseConfig = field(default_factory=ResponseConfig)
     loaded_from: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -183,9 +207,33 @@ def load_config(config_path: str | Path | None = None) -> BastionConfig:
         trusted_ips=raw_risk.get("trusted_ips", ["127.0.0.1", "::1", "localhost"]),
     )
 
+    # Parse response
+    raw_response = raw.get("response", {})
+    response_cfg = ResponseConfig(
+        mode=raw_response.get("mode", "dry_run"),
+        backend=raw_response.get("backend", "nftables"),
+        isolation_threshold=raw_response.get("isolation_threshold", 85),
+        rate_limit_threshold=raw_response.get("rate_limit_threshold", 60),
+        default_ban_duration_seconds=raw_response.get("default_ban_duration_seconds", 900),
+        repeat_offender_ban_duration_seconds=raw_response.get("repeat_offender_ban_duration_seconds", 3600),
+        max_ban_duration_seconds=raw_response.get("max_ban_duration_seconds", 86400),
+        allowlist_cidrs=raw_response.get(
+            "allowlist_cidrs",
+            [
+                "127.0.0.0/8",
+                "::1/128",
+                "10.0.0.0/8",
+                "172.16.0.0/12",
+                "192.168.0.0/16",
+            ],
+        ),
+        table_name=raw_response.get("table_name", "bastion"),
+    )
+
     return BastionConfig(
         storage=storage_cfg,
         detectors=detectors_cfg,
         risk=risk_cfg,
+        response=response_cfg,
         loaded_from=str(found_path),
     )

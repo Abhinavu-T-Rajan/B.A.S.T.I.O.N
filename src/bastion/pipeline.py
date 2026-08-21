@@ -9,6 +9,8 @@ from bastion.detection.brute_force import DetectionResult
 from bastion.detection.engine import DetectionEngine
 from bastion.models.actors import Severity, ThreatActorProfile
 from bastion.models.events import SecurityEvent
+from bastion.response.engine import ResponseEngine
+from bastion.response.models import BanRecord, BanStatus, ResponseAction, ResponseDecision, ResponseMode
 from bastion.risk.scorer import RiskEngine
 from bastion.storage.sqlite import SQLiteStorage
 
@@ -21,6 +23,8 @@ class PipelineResult:
     event: SecurityEvent | None
     detections: list[DetectionResult] = field(default_factory=list)
     profile: ThreatActorProfile | None = None
+    decision: ResponseDecision | None = None
+    ban: BanRecord | None = None
     is_alert: bool = False
     alert_message: str | None = None
 
@@ -29,8 +33,10 @@ def format_explainable_alert(
     event: SecurityEvent,
     profile: ThreatActorProfile,
     detections: list[DetectionResult],
+    decision: ResponseDecision | None = None,
+    ban: BanRecord | None = None,
 ) -> str:
-    """Render a structured, explainable threat alert."""
+    """Render a structured, explainable threat alert with defensive response status."""
     lines = [
         "🚨 THREAT DETECTED",
         f"Source      : {event.source_ip}",
@@ -52,12 +58,26 @@ def format_explainable_alert(
         users_str = ", ".join(sorted(profile.usernames_targeted)[:8])
         lines.append(f"\nTargeted Users: {users_str}")
 
-    lines.append(f"Recommended Action: {profile.recommended_action.value.replace('_', ' ').upper()}")
+    # Defensive Action Summary
+    if decision and decision.action in {ResponseAction.TEMPORARY_ISOLATION, ResponseAction.PERMANENT_BAN}:
+        dur_str = f"{decision.duration_seconds // 60}m" if decision.duration_seconds else "Permanent"
+        if decision.mode == ResponseMode.DRY_RUN:
+            action_tag = f"WOULD BLOCK [DRY-RUN] ({dur_str})"
+        elif decision.mode == ResponseMode.AUTOMATIC:
+            action_tag = f"ISOLATED [ENFORCED] ({dur_str})"
+        elif decision.mode == ResponseMode.MANUAL_APPROVAL:
+            action_tag = f"PENDING APPROVAL ({dur_str})"
+        else:
+            action_tag = f"DISABLED"
+        lines.append(f"Defense Action    : {action_tag}")
+    else:
+        lines.append(f"Recommended Action: {profile.recommended_action.value.replace('_', ' ').upper()} (ADVISORY)")
+
     return "\n".join(lines)
 
 
 class SentinelPipeline:
-    """Real-time event processing pipeline connecting telemetry, detection, risk scoring, and storage."""
+    """Real-time event processing pipeline connecting telemetry, detection, risk scoring, response, and storage."""
 
     def __init__(
         self,
@@ -65,14 +85,16 @@ class SentinelPipeline:
         parser: SSHLogParser | None = None,
         engine: DetectionEngine | None = None,
         risk_engine: RiskEngine | None = None,
+        response_engine: ResponseEngine | None = None,
         storage: SQLiteStorage | None = None,
         on_event: Callable[[SecurityEvent], None] | None = None,
-        on_alert: Callable[[SecurityEvent, ThreatActorProfile, list[DetectionResult]], None] | None = None,
+        on_alert: Callable[[SecurityEvent, ThreatActorProfile, list[DetectionResult], ResponseDecision | None], None] | None = None,
         alert_min_score: int = 70,
     ) -> None:
         self.parser = parser or SSHLogParser()
         self.engine = engine or DetectionEngine()
         self.risk_engine = risk_engine or RiskEngine()
+        self.response_engine = response_engine
         self.storage = storage
         self.on_event = on_event
         self.on_alert = on_alert
@@ -80,7 +102,7 @@ class SentinelPipeline:
         self._actor_cache: dict[str, ThreatActorProfile] = {}
 
     def process_line(self, raw_line: str) -> PipelineResult:
-        """Process a single raw log entry through parser, detection, risk scoring, and persistence."""
+        """Process a single raw log entry through parser, detection, risk scoring, response, and persistence."""
         event = self.parser.parse(raw_line)
 
         if event is None:
@@ -89,6 +111,8 @@ class SentinelPipeline:
                 event=None,
                 detections=[],
                 profile=None,
+                decision=None,
+                ban=None,
                 is_alert=False,
                 alert_message=None,
             )
@@ -131,28 +155,39 @@ class SentinelPipeline:
             existing_profile=existing_profile,
         )
 
-        # 6. Persist updated profile
+        # 6. Execute or simulate defensive response
+        decision: ResponseDecision | None = None
+        ban: BanRecord | None = None
+        if self.response_engine:
+            decision, ban = self.response_engine.process(profile)
+            # Check for ban expiration maintenance
+            self.response_engine.ban_manager.check_expirations()
+
+        # 7. Persist updated profile
         if self.storage:
             self.storage.upsert_threat_actor(profile)
         self._actor_cache[event.source_ip] = profile
 
-        # 7. Check alert conditions
+        # 8. Check alert conditions
         is_alert = (
             profile.threat_score >= self.alert_min_score
             or any(det.detected for det in detections)
+            or (decision is not None and decision.action in {ResponseAction.TEMPORARY_ISOLATION, ResponseAction.PERMANENT_BAN})
         )
         alert_msg = None
 
         if is_alert:
-            alert_msg = format_explainable_alert(event, profile, detections)
+            alert_msg = format_explainable_alert(event, profile, detections, decision, ban)
             if self.on_alert:
-                self.on_alert(event, profile, detections)
+                self.on_alert(event, profile, detections, decision)
 
         return PipelineResult(
             raw_line=raw_line,
             event=event,
             detections=detections,
             profile=profile,
+            decision=decision,
+            ban=ban,
             is_alert=is_alert,
             alert_message=alert_msg,
         )

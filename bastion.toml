@@ -46,3 +46,31 @@ trusted_ip_discount = -100
 
 # Trusted/allowlisted IP addresses (forced score 0)
 trusted_ips = ["127.0.0.1", "::1", "localhost"]
+
+[response]
+# Response mode: dry_run, manual, automatic, disabled
+mode = "dry_run"
+
+# Firewall backend: nftables, mock
+backend = "nftables"
+
+# Action thresholds
+isolation_threshold = 85
+rate_limit_threshold = 60
+
+# Ban duration in seconds (900s = 15m, 3600s = 1h, 86400s = 24h)
+default_ban_duration_seconds = 900
+repeat_offender_ban_duration_seconds = 3600
+max_ban_duration_seconds = 86400
+
+# Subnet allowlist protected from isolation
+allowlist_cidrs = [
+    "127.0.0.0/8",
+    "::1/128",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+]
+
+# Dedicated nftables table namespace
+table_name = "bastion"

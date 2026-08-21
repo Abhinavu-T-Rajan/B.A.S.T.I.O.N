@@ -34,6 +34,9 @@ class ActorState(StrEnum):
     PROBING = "probing"
     SUSPICIOUS = "suspicious"
     ACTIVE_THREAT = "active_threat"
+    ISOLATED = "isolated"
+    EXPIRED = "expired"
+    RELEASED = "released"
 
 
 class RecommendedAction(StrEnum):
@@ -94,6 +97,8 @@ class ThreatActorProfile:
         if self.last_seen.tzinfo is None:
             self.last_seen = self.last_seen.replace(tzinfo=timezone.utc)
         self.threat_score = max(0, min(100, self.threat_score))
+        if self.severity == Severity.LOW and self.threat_score > 0:
+            self.severity = Severity.from_score(self.threat_score)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize profile to a JSON-compatible dictionary."""

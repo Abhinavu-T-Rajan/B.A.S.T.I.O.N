@@ -16,10 +16,11 @@ from bastion.models.actors import (
     ThreatActorProfile,
 )
 from bastion.models.events import EventType, SecurityEvent, ServiceType
+from bastion.response.models import BanRecord, BanStatus, ResponseAction
 
 
 class SQLiteStorage:
-    """Persistent SQLite storage engine for events, detections, and threat profiles."""
+    """Persistent SQLite storage engine for events, detections, threat profiles, and bans."""
 
     def __init__(self, db_path: str = ":memory:") -> None:
         self.db_path = db_path
@@ -106,6 +107,22 @@ class SQLiteStorage:
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_score_hist_ip ON score_history (source_ip);
+
+                CREATE TABLE IF NOT EXISTS bans (
+                    ban_id TEXT PRIMARY KEY,
+                    source_ip TEXT NOT NULL,
+                    reason TEXT,
+                    threat_score INTEGER DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT,
+                    action TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    metadata TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_bans_ip ON bans (source_ip);
+                CREATE INDEX IF NOT EXISTS idx_bans_status ON bans (status);
+                CREATE INDEX IF NOT EXISTS idx_bans_expires ON bans (expires_at);
                 """
             )
 
@@ -295,6 +312,86 @@ class SQLiteStorage:
                 )
             return events
 
+    def save_ban(self, ban: BanRecord) -> None:
+        """Persist or update a ban record."""
+        meta_json = json.dumps(ban.metadata)
+        with self._lock, self._connection:
+            cur = self._connection.cursor()
+            cur.execute(
+                """
+                INSERT INTO bans (
+                    ban_id, source_ip, reason, threat_score,
+                    created_at, expires_at, action, status, metadata
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(ban_id) DO UPDATE SET
+                    status = excluded.status,
+                    expires_at = excluded.expires_at,
+                    metadata = excluded.metadata
+                """,
+                (
+                    ban.ban_id,
+                    ban.source_ip,
+                    ban.reason,
+                    ban.threat_score,
+                    ban.created_at.isoformat(),
+                    ban.expires_at.isoformat() if ban.expires_at else None,
+                    ban.action.value,
+                    ban.status.value,
+                    meta_json,
+                ),
+            )
+
+    def update_ban_status(self, ban_id: str, status: BanStatus) -> None:
+        """Update lifecycle status of an existing ban."""
+        with self._lock, self._connection:
+            cur = self._connection.cursor()
+            cur.execute(
+                "UPDATE bans SET status = ? WHERE ban_id = ?",
+                (status.value, ban_id),
+            )
+
+    def get_active_bans(self) -> list[BanRecord]:
+        """Fetch all currently active ban records."""
+        with self._lock:
+            cur = self._connection.cursor()
+            cur.execute(
+                "SELECT * FROM bans WHERE status = ? ORDER BY created_at DESC",
+                (BanStatus.ACTIVE.value,),
+            )
+            return [self._row_to_ban(r) for r in cur.fetchall()]
+
+    def get_ban_by_ip(self, source_ip: str) -> BanRecord | None:
+        """Fetch the most recent active ban record for a given IP."""
+        with self._lock:
+            cur = self._connection.cursor()
+            cur.execute(
+                "SELECT * FROM bans WHERE source_ip = ? AND status = ? ORDER BY created_at DESC LIMIT 1",
+                (source_ip, BanStatus.ACTIVE.value),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return self._row_to_ban(row)
+
+    def list_bans(
+        self,
+        status: BanStatus | None = None,
+        limit: int = 50,
+    ) -> list[BanRecord]:
+        """List ban records with optional status filtering."""
+        query = "SELECT * FROM bans"
+        params: list[Any] = []
+        if status:
+            query += " WHERE status = ?"
+            params.append(status.value)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+
+        with self._lock:
+            cur = self._connection.cursor()
+            cur.execute(query, params)
+            return [self._row_to_ban(r) for r in cur.fetchall()]
+
     def get_stats(self) -> dict[str, Any]:
         """Compute aggregated intelligence and operational metrics."""
         with self._lock:
@@ -313,6 +410,12 @@ class SQLiteStorage:
                 "SELECT COUNT(*) FROM threat_actors WHERE severity IN ('high', 'critical')"
             )
             active_threats = cur.fetchone()[0]
+
+            cur.execute(
+                "SELECT COUNT(*) FROM bans WHERE status = ?",
+                (BanStatus.ACTIVE.value,),
+            )
+            active_bans = cur.fetchone()[0]
 
             cur.execute(
                 """
@@ -349,6 +452,7 @@ class SQLiteStorage:
                 "total_detections": total_detections,
                 "total_actors": total_actors,
                 "active_threats": active_threats,
+                "active_bans": active_bans,
                 "top_targeted_usernames": top_usernames,
                 "top_threats": top_threats,
             }
@@ -381,6 +485,33 @@ class SQLiteStorage:
             state=ActorState(row["state"]),
             factors=factors,
             recommended_action=RecommendedAction(row["recommended_action"]),
+        )
+
+    def _row_to_ban(self, row: sqlite3.Row) -> BanRecord:
+        created_at = datetime.fromisoformat(row["created_at"])
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+
+        expires_at = (
+            datetime.fromisoformat(row["expires_at"])
+            if row["expires_at"]
+            else None
+        )
+        if expires_at and expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+        meta = json.loads(row["metadata"]) if row["metadata"] else {}
+
+        return BanRecord(
+            ban_id=row["ban_id"],
+            source_ip=row["source_ip"],
+            reason=row["reason"],
+            threat_score=row["threat_score"],
+            created_at=created_at,
+            expires_at=expires_at,
+            action=ResponseAction(row["action"]),
+            status=BanStatus(row["status"]),
+            metadata=meta,
         )
 
     def close(self) -> None:
