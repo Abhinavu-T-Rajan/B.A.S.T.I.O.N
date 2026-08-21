@@ -4,50 +4,62 @@
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Version: v0.1.3 (Guardian)](https://img.shields.io/badge/version-0.1.3%20(Guardian)-brightgreen.svg)]()
-[![Tests: 71 Passed](https://img.shields.io/badge/tests-71%20passed-brightgreen.svg)]()
+[![Version: v0.2.0-alpha (Oracle)](https://img.shields.io/badge/version-0.2.0--alpha%20(Oracle)-brightgreen.svg)]()
+[![Tests: 93 Passed](https://img.shields.io/badge/tests-93%20passed-brightgreen.svg)]()
 
-B.A.S.T.I.O.N. is an autonomous, explainable host-level **Intrusion Detection & Prevention System (IDS/IPS)** designed for Linux environments. It monitors live authentication telemetry, detects coordinated attack patterns, calculates multi-signal risk scores (0–100), and provides automated threat containment via `nftables` packet filtering without administrative lockout risks.
+> *"Sentinel sees. Aegis analyzes. Guardian protects. Oracle understands."*
+
+B.A.S.T.I.O.N. is an autonomous, explainable host-level **Intrusion Detection, Prevention & Threat Correlation Platform (IDS/IPS/SOAR)** designed for Linux environments. It monitors live authentication telemetry, correlates behavioral detector signals with local threat intelligence (IOCs), maps observed attack patterns to MITRE ATT&CK techniques, tracks incident lifecycles, and executes audited host isolation responses.
 
 ---
 
 ## Architecture Overview
 
 ```
-                         B.A.S.T.I.O.N. Architecture
-                                      │
-                         ┌────────────▼────────────┐
-                         │     Telemetry Layer     │ (systemd-journald / sshd / stdin)
-                         └────────────┬────────────┘
-                                      │
-                         ┌────────────▼────────────┐
-                         │   Normalized Events     │ (SecurityEvent abstraction)
-                         └────────────┬────────────┘
-                                      │
-                         ┌────────────▼────────────┐
-                         │    Detection Suite      │ (Brute-Force, Spray, Enum, Burst)
-                         └────────────┬────────────┘
-                                      │
-                         ┌────────────▼────────────┐
-                         │   Threat Risk Engine    │ (Explainable 0–100 Threat Score)
-                         └────────────┬────────────┘
-                                      │
-                         ┌────────────▼────────────┐
-                         │      Policy Engine      │ (CIDR Allowlist, Severity Thresholds)
-                         └────────────┬────────────┘
-                                      │
-                         ┌────────────▼────────────┐
-                         │     Response Engine     │ (Dry-Run, Automatic, Manual, Disabled)
-                         ├─────────────────────────┤
-                         │ • Ban Manager           │ (State Machine, Expirations, SQLite)
-                         └────────────┬────────────┘
-                                      │
-                         ┌────────────▼────────────┐
-                         │    Firewall Backend     │
-                         ├─────────────────────────┤
-                         │ • NFTablesBackend       │ (Dedicated 'inet bastion' namespace)
-                         │ • MockFirewallBackend   │ (Testing & non-root environments)
-                         └─────────────────────────┘
+                         B.A.S.T.I.O.N. v0.2.0-alpha (Oracle)
+                                          │
+                             ┌────────────▼────────────┐
+                             │     Telemetry Layer     │ (systemd-journald / sshd / stdin)
+                             └────────────┬────────────┘
+                                          │
+                             ┌────────────▼────────────┐
+                             │   Normalized Events     │ (SecurityEvent abstraction)
+                             └────────────┬────────────┘
+                                          │
+                             ┌────────────▼────────────┐
+                             │    Detection Suite      │ (Brute-Force, Spray, Enum, Burst)
+                             └────────────┬────────────┘
+                                          │
+                             ┌────────────▼────────────┐
+                             │ Threat Intel Subsystem  │ (IOC Validation, Storage & Matching)
+                             └────────────┬────────────┘
+                                          │
+                             ┌────────────▼────────────┐
+                             │ Threat Risk Engine      │ (Multi-signal 0–100 Threat Score)
+                             └────────────┬────────────┘
+                                          │
+                             ┌────────────▼────────────┐
+                             │ Threat Correlation      │ (ATT&CK Mapping, Incident Lifecycle,
+                             │       Engine            │  Alert Deduplication, Timelines)
+                             └────────────┬────────────┘
+                                          │
+                             ┌────────────▼────────────┐
+                             │      Policy Engine      │ (CIDR Allowlist, Severity Thresholds)
+                             └────────────┬────────────┘
+                                          │
+                             ┌────────────▼────────────┐
+                             │     Response Engine     │ (Dry-Run, Automatic, Manual, Disabled)
+                             ├─────────────────────────┤
+                             │ • Ban Manager           │ (State Machine, Expirations, SQLite)
+                             │ • Experimental Response │ (Audited actions: block, contain, kill)
+                             └────────────┬────────────┘
+                                          │
+                             ┌────────────▼────────────┐
+                             │    Firewall Backend     │
+                             ├─────────────────────────┤
+                             │ • NFTablesBackend       │ (Dedicated 'inet bastion' namespace)
+                             │ • MockFirewallBackend   │ (Testing & non-root environments)
+                             └─────────────────────────┘
 ```
 
 For complete technical documentation on the internal pipeline and subsystem interfaces, refer to the [System Architecture Guide](docs/architecture.md).
@@ -56,218 +68,165 @@ For complete technical documentation on the internal pipeline and subsystem inte
 
 ## Documentation
 
-- **[System Architecture](docs/architecture.md)**: Detailed breakdown of the pipeline, data structures, and subsystem contracts.
+- **[System Architecture](docs/architecture.md)**: Detailed breakdown of the pipeline, data structures, correlation engine, and subsystem contracts.
 - **[Threat Model & Security Analysis](docs/threat-model.md)**: Exhaustive analysis of host threats, parser boundaries, false positives, and fail-safe recovery controls.
 - **[Linux Deployment Guide](docs/deployment.md)**: Production deployment instructions, OpenSSH tuning, configuration hardening, and safe phase-by-phase rollout workflows.
 - **[Security Policy](SECURITY.md)**: Vulnerability disclosure guidelines, reporting channels, and remediation timelines.
 - **[Contributing Guide](CONTRIBUTING.md)**: Branching workflow (`main` / `development`), Conventional Commits, and test requirements.
-- **[Changelog](CHANGELOG.md)**: Full release history from `v0.1.0` through `v0.1.3`.
+- **[Changelog](CHANGELOG.md)**: Full release history from `v0.1.0` through `v0.2.0-alpha`.
 - **[Code of Conduct](CODE_OF_CONDUCT.md)**: Community standards and enforcement policies.
 - **[License](LICENSE)**: Full text of the Apache License 2.0.
 
 ---
 
-## Key Features
+## Key Subsystems & Features
 
-### 1. Telemetry Ingestion & Log Normalization (v0.1.1 Sentinel)
+### 1. Telemetry Ingestion & Log Normalization (Sentinel)
 - **Live Journald Streaming**: Direct non-blocking ingestion from `systemd-journald` for `ssh.service` and `sshd.service`.
 - **OpenSSH Log Parser**: Normalized `SecurityEvent` model covering passwords, public keys, invalid users, connection drops, and max attempt violations across IPv4 and IPv6.
 
-### 2. Behavioral Detection Suite (v0.1.2 Aegis)
+### 2. Behavioral Detection Suite (Aegis)
 - **Brute-Force Detector**: Sliding-window counter with time-decay expiration.
 - **Password Spray Detector**: Identifies single IPs probing multiple distinct usernames with low attempt counts per account.
 - **Username Enumeration Detector**: Flags rapid invalid-user authentication attempts.
 - **Burst Velocity Detector**: Detects sudden high-frequency request spikes ($\ge 5$ attempts in 5 seconds).
 
-### 3. Explainable Threat Intelligence & Risk Engine (v0.1.2 Aegis)
-- **Multi-Signal 0–100 Scoring**: Transparent scoring model combining auth failures, invalid user probing, detector activations, burst velocity, and repeat offender history.
-- **Auditable Score Factors**: Every score is accompanied by human-readable, auditable factor explanations.
-- **Forensic Threat Profiles**: Tracks first/last seen, targeted accounts, targeted services, and state transitions.
+### 3. Threat Intelligence & IOC Subsystem (Oracle)
+- **Format Validation**: Strict validation for IP addresses, domains, cryptographic hashes (`MD5`, `SHA1`, `SHA256`), and usernames.
+- **Provenance Tracking**: Distinguishes data trust levels: `OBSERVED`, `INFERRED`, `CONFIGURED`, `CONFIRMED`, and `UNKNOWN`.
+- **Real-Time Event Matching**: Live matching of incoming events against active IOCs with adaptive risk scoring bonuses (+15 to +30 points).
 
-### 4. Response Engine & Ban Lifecycle Management (v0.1.3 Guardian)
-- **Safety Controls & Allowlisting**: Subnet matching (`ipaddress.ip_network`) permanently protects `127.0.0.0/8`, `::1/128`, `10.0.0.0/8`, `172.16.0.0/12`, and `192.168.0.0/16` from accidental lockout.
-- **Flexible Response Modes**:
-  - `DRY_RUN` *(Default)*: Evaluates risk and displays `"WOULD BLOCK <IP>"` without modifying firewall rules.
-  - `AUTOMATIC`: Enforces kernel-level packet isolation via `nftables`.
-  - `MANUAL_APPROVAL`: Queues recommendations for operator approval.
-  - `DISABLED`: Emergency killswitch.
-- **Ban State Machine**: `NEUTRAL` $\rightarrow$ `PROBING` $\rightarrow$ `SUSPICIOUS` $\rightarrow$ `ACTIVE_THREAT` $\rightarrow$ `ISOLATED` $\rightarrow$ `EXPIRED` / `RELEASED`.
-- **Automatic Expirations & Startup Recovery**: Auto-releases expired bans and restores active unexpired rules upon daemon restarts.
+### 4. Threat Correlation & MITRE ATT&CK Mapping (Oracle)
+- **MITRE ATT&CK Catalog**: Authentic techniques mapped to behavioral detectors:
+  - `T1110.001`: Password Guessing (Brute Force)
+  - `T1110.003`: Password Spraying
+  - `T1087.001`: Account Discovery (Username Enumeration)
+  - `T1499`: Endpoint Denial of Service (Burst Spikes)
+  - `T1078`: Valid Accounts
+- **Alert Deduplication**: Rolling time-window cache preventing redundant alert output while maintaining full event telemetry.
+- **Incident Lifecycle**: Tracks incident progression through `OPEN`, `INVESTIGATING`, `CONTAINED`, `RESOLVED`, and `CLOSED`.
+- **Investigation Timelines**: Reconstructs complete forensic histories across events, detections, risk score transitions, bans, and response audits.
 
-### 5. Non-Disruptive `nftables` Integration
-- **Isolated Namespace**: All firewall rules operate inside a dedicated table `inet bastion` with sets `blacklist_v4` and `blacklist_v6`.
-- **Zero Conflict**: Never flushes, overwrites, or alters existing host firewall rules or chains.
+### 5. Defensive Response & Firewall Integration (Guardian & Oracle)
+- **Safety Controls & Allowlisting**: Subnet matching permanently protects `127.0.0.0/8`, `::1/128`, `10.0.0.0/8`, `172.16.0.0/12`, and `192.168.0.0/16`.
+- **Isolated `nftables` Integration**: Dedicated `table inet bastion` with `blacklist_v4` / `blacklist_v6` sets, zero host firewall disruption.
+- **Audited Experimental Response**: Isolated response actions with validation and tamper-evident `response_audits` logging.
 
 ---
 
-## Installation
+## Installation & Quick Start
+
+### 1. Clone and Install in Virtual Environment
 
 ```bash
-# Clone the repository
 git clone https://github.com/Abhinavu-T-Rajan/B.A.S.T.I.O.N.git
 cd B.A.S.T.I.O.N
 
-# Set up Python virtual environment (Python 3.11+)
 python3 -m venv .venv
 source .venv/bin/activate
-
-# Install in editable mode with development dependencies
 pip install -e ".[dev]"
 ```
 
+### 2. Check Operational Status
+
+```bash
+bastion status
+```
+
+### 3. Run Behavioral Simulation
+
+```bash
+bastion test-detection --attempts 12 --threshold 10
+```
+
 ---
 
-## CLI Usage
+## CLI Reference Guide
 
-### System & Subsystem Inspection
+### Threat Intelligence (IOC) Management
 ```bash
-# Show system status, database health, response mode, and protected subnets
-bastion status
+# Add a new IOC
+bastion ioc add --type ip --value 198.51.100.23 --confidence 90 --tags scanner,c2 --notes "Observed in spray campaign"
 
-# Show firewall table status and active blocked set
-bastion firewall status
+# List active IOCs
+bastion ioc list --type ip --status active
 
-# Inspect configuration
-bastion config show
+# Search IOCs by query
+bastion ioc search scanner
 
-# View aggregated intelligence metrics
-bastion stats
+# Delete an IOC
+bastion ioc delete <ioc-id>
 ```
 
-### Threat Monitoring & Live IPS
+### Incident Management
 ```bash
-# Live stream from systemd-journald in dry-run mode (safe evaluation)
-bastion monitor --follow --dry-run
+# List open incidents
+bastion incident list --status open
 
-# Live stream with automated firewall enforcement
-sudo bastion monitor --follow --enforce
+# Inspect incident details
+bastion incident inspect <incident-id>
 
-# Pipe simulated logs via stdin
-cat test_attack.log | bastion monitor --stdin --dry-run
+# Update incident status
+bastion incident update <incident-id> --status contained --notes "Host isolated via nftables"
+
+# Create a manual incident
+bastion incident create --title "Investigating Suspicious Login Spike" --severity high --risk 85
 ```
 
-### Forensic Analysis & Threat Actor Profiles
+### Investigation Timelines & MITRE ATT&CK
 ```bash
-# List all tracked threat actors ranked by risk score
-bastion threats
+# View chronological investigation timeline for an IP
+bastion timeline --ip 198.51.100.23
 
-# Inspect full forensic timeline, score factors, and ban status for an IP
+# View chronological investigation timeline for an Incident
+bastion timeline --incident <incident-id>
+
+# List MITRE ATT&CK catalog
+bastion attack
+
+# Inspect specific technique
+bastion attack T1110.003
+```
+
+### Threat Actors & Bans
+```bash
+# List tracked threat actors
+bastion threats --min-score 70
+
+# Inspect forensic profile of an IP
 bastion inspect 198.51.100.23
 
-# Query recorded telemetry events
-bastion events --ip 198.51.100.23 --limit 20
-```
-
-### Ban Management
-```bash
-# List active or historical bans
+# List active bans
 bastion bans
-bastion bans --all
 
-# Manually isolate an IP (15-minute temporary ban)
-bastion ban 203.0.113.50 --duration 900 --reason "Port scanning & brute force"
+# Manually isolate an IP (15 minutes default)
+bastion ban 203.0.113.88 --duration 900
 
-# Apply a permanent ban
-bastion ban 203.0.113.50 --permanent --reason "Persistent attacker"
+# Release a ban
+bastion unban 203.0.113.88
+```
 
-# Release an active ban
-bastion unban 203.0.113.50
+### Live Monitoring
+```bash
+# Monitor live journald logs in dry-run mode (safe testing)
+bastion monitor --follow --dry-run
 
-# Flush all bastion firewall rules
-bastion firewall flush
+# Monitor with automatic nftables enforcement
+sudo $(which bastion) monitor --follow --enforce
 ```
 
 ---
 
-## Configuration (`bastion.toml`)
-
-Configure thresholds, scoring weights, and response behaviors in `bastion.toml`:
-
-```toml
-[storage]
-db_path = "~/.local/share/bastion/bastion.db"
-
-[detectors.brute_force]
-enabled = true
-threshold = 10
-window_seconds = 60
-
-[detectors.password_spray]
-enabled = true
-min_usernames = 3
-max_attempts_per_user = 3
-window_seconds = 120
-
-[detectors.enumeration]
-enabled = true
-threshold = 4
-window_seconds = 60
-
-[detectors.burst]
-enabled = true
-threshold = 5
-window_seconds = 5
-
-[risk]
-medium_threshold = 40
-high_threshold = 70
-critical_threshold = 85
-trusted_ips = ["127.0.0.1", "::1", "localhost"]
-
-[response]
-mode = "dry_run"                  # dry_run, manual, automatic, disabled
-backend = "nftables"             # nftables, mock
-isolation_threshold = 85         # Score >= 85 triggers isolation
-rate_limit_threshold = 60
-default_ban_duration_seconds = 900
-repeat_offender_ban_duration_seconds = 3600
-max_ban_duration_seconds = 86400
-
-# Subnets permanently protected from blocking
-allowlist_cidrs = [
-    "127.0.0.0/8",
-    "::1/128",
-    "10.0.0.0/8",
-    "172.16.0.0/12",
-    "192.168.0.0/16",
-]
-
-table_name = "bastion"
-```
-
----
-
-## Running Tests
-
-Run the complete test suite with `pytest`:
+## Running the Automated Test Suite
 
 ```bash
 pytest -v
 ```
 
-All 71 unit and integration tests validate log parsing, behavioral detection algorithms, risk scoring formulas, CIDR allowlisting, ban state machines, nftables command generation, and CLI interfaces.
-
----
-
-## Development & Branching Model
-
-- **`main`**: Production-ready, verified release tags.
-- **`development`**: Active integration branch for upcoming features and detector improvements.
-- See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution rules, code review expectations, and Conventional Commit requirements.
-
----
-
-## Roadmap & Release Progression
-
-- **v0.1.0 — Foundation**: Core architecture, SecurityEvent model, and brute force detection.
-- **v0.1.1 — Sentinel**: Systemd-journald streaming & OpenSSH regex parsing.
-- **v0.1.2 — Aegis**: Behavioral detection suite (spray, enum, burst), 0–100 risk scoring engine, and SQLite persistence.
-- **v0.1.3 — Guardian** *(Current)*: Response engine, policy engine, ban lifecycle manager, nftables integration, and CIDR allowlisting.
-- **v0.2.0 — Autonomous Host Defense**: Systemd service integration, daemonized background worker, and notification webhooks.
-- **v0.3.0+ — Aegis Enterprise**: Web dashboard, distributed multi-server telemetry, and threat intelligence feeds.
+All 93 test cases cover log parsing, behavioral detection, risk scoring, threat intelligence validation, correlation, incident lifecycles, investigation timelines, response auditing, and CLI workflows.
 
 ---
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE) for details.
+B.A.S.T.I.O.N. is licensed under the **Apache License 2.0**. See [LICENSE](LICENSE) for details.

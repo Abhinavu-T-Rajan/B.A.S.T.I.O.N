@@ -1,6 +1,6 @@
 # Threat Model & Security Architecture
 
-This document provides a threat model for **B.A.S.T.I.O.N.** (v0.1.3 "Guardian"), assessing security risks against both the protected Linux host and the B.A.S.T.I.O.N. software itself.
+This document provides a threat model for **B.A.S.T.I.O.N.** (v0.2.0-alpha "Oracle"), assessing security risks against both the protected Linux host and the B.A.S.T.I.O.N. software itself.
 
 ---
 
@@ -10,7 +10,7 @@ This document provides a threat model for **B.A.S.T.I.O.N.** (v0.1.3 "Guardian")
 1. **Host Availability & Network Reachability**: Ensuring legitimate administrator and user traffic is never improperly blocked.
 2. **Authentication Subsystem Integrity**: Safeguarding OpenSSH and Linux host credentials against automated compromise.
 3. **Firewall Rule Consistency**: Preserving kernel packet filtering rules without state desynchronization or unintended policy wipes.
-4. **Auditability & Threat Intelligence Data**: Maintaining an accurate, tamper-resistant history of security events, offender scores, and ban records.
+4. **Auditability & Threat Intelligence Data**: Maintaining an accurate, tamper-resistant history of security events, offender scores, incidents, IOCs, and response actions.
 
 ### Threat Actors
 - **External Network Attackers**: Unauthorized entities probing exposed SSH ports using automated brute-force tools, password spraying scripts, and credential stuffing lists.
@@ -27,7 +27,7 @@ This document provides a threat model for **B.A.S.T.I.O.N.** (v0.1.3 "Guardian")
 | :--- | :--- | :--- | :--- |
 | **ReDoS (Regex Denial of Service)** | Attacker sends crafted SSH banner or username payloads designed to trigger catastrophic backtracking in regex parsers. | Regular expressions in `SSHLogParser` are strictly anchored with non-backtracking patterns and length constraints. | Log input length truncation before regex execution is not explicitly enforced. |
 | **Log Injection / Format String Abuse** | Attacker inserts newline (`\n`), ANSI escape codes, or control characters in username fields to falsify log entries. | Events are parsed line-by-line using `strip()`. Extracted fields are stored as typed Python objects and sanitized in terminal alert formatters. | Terminal ANSI escape character sanitization on raw username strings is not yet strictly filtered. |
-| **IP Address Spoofing / Malformed IPs** | Attacker injects non-standard IP formats or hostnames to crash the pipeline. | All extracted IP strings are validated through Python's standard `ipaddress.ip_address` library in `NFTablesBackend` and `PolicyEngine`. Invalid IP strings fail gracefully. | Upstream TCP connection state verification (e.g. syn-proxy) is outside B.A.S.T.I.O.N.'s scope. |
+| **IP Address Spoofing / Malformed IPs** | Attacker injects non-standard IP formats or hostnames to crash the pipeline. | All extracted IP strings are validated through Python's standard `ipaddress.ip_address` library in `NFTablesBackend`, `IOCValidator`, and `PolicyEngine`. Invalid IP strings fail gracefully. | Upstream TCP connection state verification (e.g. syn-proxy) is outside B.A.S.T.I.O.N.'s scope. |
 
 ---
 
@@ -63,8 +63,21 @@ This document provides a threat model for **B.A.S.T.I.O.N.** (v0.1.3 "Guardian")
 
 ---
 
-## 3. Residual Risks & Future Hardening
+### 2.5 Threat Intelligence & Correlation Integrity (Oracle)
 
-1. **Privilege Separation (v0.2.0)**: Transition from monolithic root execution to a split-privilege architecture where log parsing runs as an unprivileged service user and firewall manipulations run through a restricted helper or systemd capability assignment.
-2. **Log Flooding DoS**: While sliding windows evict old entries, high-velocity log flooding ($> 10,000$ events/sec) could increase CPU utilization. Future releases will introduce ingestion rate limiting and queue bounding.
-3. **Distributed Coordination (v0.3.0)**: Currently, threat actor state is host-local. A coordinated attack across 50 servers requires multi-node synchronization, planned for future enterprise milestones.
+| Threat | Description | Implemented Mitigation | Unimplemented / Future Controls |
+| :--- | :--- | :--- | :--- |
+| **IOC Data Poisoning** | Malformed, broadcast, or loopback IPs/domains injected as IOCs to cause unintended host blacklisting. | **Strict Format Validation**: `IOCValidator` enforces strict syntax checking across IPv4/IPv6, RFC-compliant domain formats, hexadecimal hash lengths, and username boundaries. Broadcast/multicast IPs are rejected. | Integration with external signed threat intelligence feeds (STIX/TAXII) is planned for future milestones. |
+| **Attribution Over-Confidence** | Conflating heuristic behavioral activity with verified state-sponsored threat groups. | **Explicit Provenance Classification**: The system explicitly tracks data origin: `OBSERVED`, `INFERRED`, `CONFIGURED`, `CONFIRMED`, `UNKNOWN`. Terms such as *Observed Actor* and *Activity Cluster* are maintained rather than unfounded attribution. | Cryptographically signed provenance records are not yet implemented. |
+| **Alert Notification Flooding (DoS)** | High-velocity attacks flooding security operator alerting channels, causing alert fatigue and monitoring blindness. | **Rolling Alert Deduplication**: `CorrelationEngine` maintains a configurable sliding window (default 30s) deduplicating repetitive alerts for the same `(source_ip, detector_name)` pair while continuing to log all underlying events in storage. | Webhook rate limiting and priority queues are planned for upcoming daemon services. |
+| **Unauthorized Destructive Response Actions** | Automation executing arbitrary system commands or destructive host modifications. | **Target-Validated Response Coordinator**: `ExperimentalResponseCoordinator` isolates all response execution, strictly validates targets, enforces dry-run safety modes, and logs immutable records to `response_audits`. | Linux eBPF execution tracing for response containment actions is planned for future milestones. |
+
+---
+
+## 3. Summary of Core Fail-Safe Invariants
+
+1. **Localhost & Management Subnets are Never Blocked**: Evaluated before any firewall command.
+2. **Safe Default Response Mode**: `DRY_RUN` is active unless explicitly overridden.
+3. **Dedicated Firewall Table Namespace**: Zero modifications to foreign chains in `nftables`.
+4. **Parameterized Execution Everywhere**: Subprocess calls and SQLite queries never use shell interpolation or string concatenation.
+5. **No Production Dummy Data**: All production forensic data and threat records are generated from actual telemetry or validated operator inputs.
