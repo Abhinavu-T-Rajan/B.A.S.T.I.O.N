@@ -3,7 +3,7 @@
 **Behavioral Attack Surveillance & Threat Isolation Operating Network**
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Version: v0.1.3 (Guardian)](https://img.shields.io/badge/version-0.1.3%20(Guardian)-brightgreen.svg)]()
 
 B.A.S.T.I.O.N. is an autonomous, explainable host-level **Intrusion Detection & Prevention System (IDS/IPS)** designed for Linux environments. It monitors live authentication telemetry, detects coordinated attack patterns, calculates multi-signal risk scores (0–100), and provides automated threat containment via `nftables` packet filtering without administrative lockout risks.
@@ -245,5 +245,5 @@ All 71 unit and integration tests validate log parsing, behavioral detection alg
 ---
 
 ## License
-
-MIT License. See [LICENSE](LICENSE) for details.
+ 
+Apache License 2.0. See [LICENSE](LICENSE) for details.
