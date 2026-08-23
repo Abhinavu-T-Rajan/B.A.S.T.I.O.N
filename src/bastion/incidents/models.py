@@ -9,6 +9,9 @@ from typing import Any
 
 from bastion.models.actors import Severity
 
+# Domain alias
+IncidentSeverity = Severity
+
 
 class IncidentStatus(StrEnum):
     """Lifecycle states of a security incident."""

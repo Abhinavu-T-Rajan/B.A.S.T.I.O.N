@@ -1,18 +1,15 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-from bastion.models.events import EventType, SecurityEvent
-
-
+from bastion.core.contracts.detector import Detector
 from bastion.detection.base import DetectionResult
 from bastion.models.events import EventType, SecurityEvent
 
 
-class BruteForceDetector:
+class BruteForceDetector(Detector):
     """Detect repeated authentication failures from a source IP within a sliding window."""
 
     def __init__(
@@ -20,7 +17,11 @@ class BruteForceDetector:
         *,
         threshold: int = 10,
         window_seconds: int = 60,
+        name: str = "brute_force",
+        description: str = "Detect repeated authentication failures from a source IP",
+        enabled: bool = True,
     ) -> None:
+        super().__init__(name=name, description=description, enabled=enabled)
         if threshold <= 0:
             raise ValueError("threshold must be greater than zero")
 
@@ -33,6 +34,16 @@ class BruteForceDetector:
 
     def evaluate(self, event: SecurityEvent) -> DetectionResult:
         """Evaluate one security event."""
+        if not self.enabled:
+            return DetectionResult(
+                detected=False,
+                source_ip=event.source_ip,
+                event_count=0,
+                threshold=self.threshold,
+                window_seconds=int(self.window.total_seconds()),
+                detector_name=self.name,
+            )
+
         if event.event_type not in {
             EventType.AUTH_FAILURE,
             EventType.INVALID_USER,
@@ -43,7 +54,7 @@ class BruteForceDetector:
                 event_count=self._count_active(event.source_ip, event.timestamp),
                 threshold=self.threshold,
                 window_seconds=int(self.window.total_seconds()),
-                detector_name="brute_force",
+                detector_name=self.name,
             )
 
         timestamps = self._failures[event.source_ip]
@@ -64,7 +75,7 @@ class BruteForceDetector:
                 threshold=self.threshold,
                 window_seconds=int(self.window.total_seconds()),
                 reason="repeated authentication failures",
-                detector_name="brute_force",
+                detector_name=self.name,
             )
 
         return DetectionResult(
@@ -73,8 +84,12 @@ class BruteForceDetector:
             event_count=count,
             threshold=self.threshold,
             window_seconds=int(self.window.total_seconds()),
-            detector_name="brute_force",
+            detector_name=self.name,
         )
+
+    def reset(self) -> None:
+        """Reset internal failures map."""
+        self._failures.clear()
 
     def _count_active(
         self,

@@ -82,17 +82,16 @@ class IOCRecord:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> IOCRecord:
-        """Construct an IOCRecord from a dictionary."""
+        """Construct IOC record from dictionary or database row mapping."""
         first_seen = data.get("first_seen")
-        last_seen = data.get("last_seen")
-
         if isinstance(first_seen, str):
-            first_seen_dt = datetime.fromisoformat(first_seen)
+            first_seen_dt = datetime.fromisoformat(first_seen.replace("Z", "+00:00"))
         else:
             first_seen_dt = first_seen or datetime.now(timezone.utc)
 
+        last_seen = data.get("last_seen")
         if isinstance(last_seen, str):
-            last_seen_dt = datetime.fromisoformat(last_seen)
+            last_seen_dt = datetime.fromisoformat(last_seen.replace("Z", "+00:00"))
         else:
             last_seen_dt = last_seen or datetime.now(timezone.utc)
 
@@ -121,3 +120,7 @@ class IOCRecord:
             notes=data.get("notes", ""),
             metadata=metadata,
         )
+
+
+# Domain alias
+Indicator = IOCRecord

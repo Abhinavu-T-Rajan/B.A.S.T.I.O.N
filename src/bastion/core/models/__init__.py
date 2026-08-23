@@ -1,21 +1,16 @@
+"""Stable domain models for B.A.S.T.I.O.N. core."""
+
 from bastion.core.models.telemetry import RawTelemetry
-from bastion.models.actors import (
-    ActorState,
-    RecommendedAction,
-    ScoreFactor,
-    Severity,
-    ThreatActorProfile,
-)
+from bastion.models.actors import ActorState, RecommendedAction, Severity, ThreatActorProfile
 from bastion.models.events import EventType, SecurityEvent, ServiceType
 
 __all__ = [
-    "ActorState",
-    "EventType",
     "RawTelemetry",
-    "RecommendedAction",
-    "ScoreFactor",
     "SecurityEvent",
+    "EventType",
     "ServiceType",
-    "Severity",
     "ThreatActorProfile",
+    "ActorState",
+    "Severity",
+    "RecommendedAction",
 ]

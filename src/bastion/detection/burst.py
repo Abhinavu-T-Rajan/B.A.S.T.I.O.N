@@ -3,11 +3,12 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
 
-from bastion.detection.brute_force import DetectionResult
+from bastion.core.contracts.detector import Detector
+from bastion.detection.base import DetectionResult
 from bastion.models.events import EventType, SecurityEvent
 
 
-class BurstDetector:
+class BurstDetector(Detector):
     """Detects sudden high-velocity authentication bursts in short time windows."""
 
     def __init__(
@@ -15,7 +16,11 @@ class BurstDetector:
         *,
         threshold: int = 5,
         window_seconds: int = 5,
+        name: str = "burst_velocity",
+        description: str = "Detect sudden high-velocity authentication bursts within seconds",
+        enabled: bool = True,
     ) -> None:
+        super().__init__(name=name, description=description, enabled=enabled)
         if threshold <= 0:
             raise ValueError("threshold must be greater than zero")
         if window_seconds <= 0:
@@ -27,6 +32,16 @@ class BurstDetector:
 
     def evaluate(self, event: SecurityEvent) -> DetectionResult:
         """Evaluate event for high-frequency burst patterns."""
+        if not self.enabled:
+            return DetectionResult(
+                detected=False,
+                source_ip=event.source_ip,
+                event_count=0,
+                threshold=self.threshold,
+                window_seconds=int(self.window.total_seconds()),
+                detector_name=self.name,
+            )
+
         if event.event_type not in {EventType.AUTH_FAILURE, EventType.INVALID_USER}:
             active_count = self._count_active(event.source_ip, event.timestamp)
             return DetectionResult(
@@ -35,7 +50,7 @@ class BurstDetector:
                 event_count=active_count,
                 threshold=self.threshold,
                 window_seconds=int(self.window.total_seconds()),
-                detector_name="burst_velocity",
+                detector_name=self.name,
             )
 
         timestamps = self._history[event.source_ip]
@@ -54,8 +69,12 @@ class BurstDetector:
             reason=f"attack burst velocity detected ({count} attempts in {int(self.window.total_seconds())}s)"
             if detected
             else None,
-            detector_name="burst_velocity",
+            detector_name=self.name,
         )
+
+    def reset(self) -> None:
+        """Reset internal history map."""
+        self._history.clear()
 
     def _count_active(self, source_ip: str, current_time: datetime) -> int:
         timestamps = self._history[source_ip]

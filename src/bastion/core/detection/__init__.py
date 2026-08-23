@@ -1,4 +1,4 @@
-from __future__ import annotations
+"""Detection contracts and engines for B.A.S.T.I.O.N."""
 
 from bastion.core.contracts.detector import Detector, DetectorProvider
 from bastion.detection.base import DetectionResult
@@ -9,12 +9,12 @@ from bastion.detection.enumeration import UsernameEnumerationDetector
 from bastion.detection.password_spray import PasswordSprayDetector
 
 __all__ = [
-    "BruteForceDetector",
-    "BurstDetector",
-    "DetectionEngine",
-    "DetectionResult",
     "Detector",
     "DetectorProvider",
+    "DetectionResult",
+    "DetectionEngine",
+    "BruteForceDetector",
     "PasswordSprayDetector",
     "UsernameEnumerationDetector",
+    "BurstDetector",
 ]

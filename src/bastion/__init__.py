@@ -20,8 +20,19 @@ from bastion.config import (
     validate_config,
     validate_config_strict,
 )
+from bastion.core.contracts.collector import CollectorProvider, EventNormalizer, TelemetryAdapter
+from bastion.core.contracts.detector import Detector, DetectorProvider
+from bastion.core.contracts.firewall import FirewallError, FirewallProvider
+from bastion.core.contracts.response import ResponseProvider
+from bastion.core.contracts.storage import StorageProvider
+from bastion.core.models.telemetry import RawTelemetry
 from bastion.correlation.engine import CorrelationEngine
 from bastion.correlation.models import CorrelationContext
+from bastion.services.defense import DefenseAppService
+from bastion.services.health import HealthAppService
+from bastion.services.incidents import IncidentAppService
+from bastion.services.intelligence import IntelligenceAppService
+from bastion.services.pipeline import PipelineResult, SentinelPipeline, format_explainable_alert
 from bastion.daemon.logging import (
     BAN_EXPIRED,
     BAN_RESTORED,

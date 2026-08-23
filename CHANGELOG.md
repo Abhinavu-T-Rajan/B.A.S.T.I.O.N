@@ -16,6 +16,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.0] — Gateway (2026-08-23)
+
+> *"Separate what B.A.S.T.I.O.N. does from how B.A.S.T.I.O.N. implements it."*
+
+### Added
+- **Core Domain & Contract Layer (`src/bastion/core/`)**:
+  - `RawTelemetry` (`bastion.core.models.telemetry`): Canonical immutable data model capturing raw message strings, transport types, timestamps, unit names, syslog identifiers, PIDs, and metadata.
+  - `CollectorProvider` (`bastion.core.contracts.collector`): Provider protocol for stream-based and batch-based telemetry collection.
+  - `TelemetryAdapter` & `EventNormalizer` (`bastion.core.contracts.collector`): Pure parsing contract separating raw byte/log ingestion from semantic domain `SecurityEvent` normalization.
+  - `Detector` & `DetectorProvider` (`bastion.core.contracts.detector`): Standardized, pluggable contract for behavioral threat detectors with lifecycle evaluate/reset methods.
+  - `FirewallProvider` (`bastion.core.contracts.firewall`): Abstract interface for firewall packet-filtering engines.
+  - `StorageProvider` (`bastion.core.contracts.storage`): Abstract persistence interface decouples core logic from SQLite storage driver.
+  - `ResponseProvider` (`bastion.core.contracts.response`): Standardized interface for policy evaluation and defense decision dispatch.
+- **Telemetry Gateway & Adapters (`src/bastion/infrastructure/telemetry/`)**:
+  - `JournaldCollector`: Provider implementation streaming raw journal entries from `systemd-journald`.
+  - `StdinCollector`: Provider implementation streaming raw lines from standard input pipes.
+  - `FileCollector`: Provider implementation streaming raw log lines from authentication log files.
+  - `SSHLogAdapter`: Pluggable adapter converting OpenSSH / PAM telemetry into normalized `SecurityEvent` records.
+  - `CompositeEventNormalizer`: Multi-adapter router dispatching `RawTelemetry` records to appropriate protocol adapters.
+- **Application Services Layer (`src/bastion/services/`)**:
+  - `DefenseAppService`: Centralized application service managing status overviews, threat profile queries, manual bans/unbans, and firewall operations.
+  - `IntelligenceAppService`: Application service for IOC creation, searching, lifecycle management, and MITRE ATT&CK inspection.
+  - `IncidentAppService`: Application service orchestrating incident management and forensic timeline construction.
+  - `HealthAppService`: Application service providing live subsystem health diagnostics and report formatting.
+  - `SentinelPipeline`: Unified defense processing pipeline operating seamlessly across `RawTelemetry` records and legacy string inputs.
+- **Architecture Enforcement Tests**:
+  - `tests/test_architecture_boundaries.py`: AST-based automated tests enforcing dependency inversion (core never imports infrastructure, cli, or drivers; detectors never import storage or firewall; telemetry adapters never import response).
+  - `tests/test_telemetry_gateway.py`: Comprehensive test suite for `RawTelemetry`, collectors, and normalization adapters.
+  - `tests/test_detector_contract.py`: Validation of custom `Detector` subclass registration and engine evaluation.
+  - `tests/test_application_services.py`: End-to-end verification of all application service workflows.
+
+### Changed
+- **Thin CLI Refactoring (`src/bastion/cli.py`)**:
+  - Reduced CLI commands to application-client role; command handlers now delegate all business logic to `DefenseAppService`, `IntelligenceAppService`, `IncidentAppService`, and `HealthAppService`.
+- **Extensible Detection Engine (`src/bastion/detection/engine.py`)**:
+  - Refactored `DetectionEngine` to support dynamic registration (`register(detector)`), multiple detector providers, and batch evaluation.
+- **Daemon Telemetry Integration (`src/bastion/daemon/runner.py`)**:
+  - `BastionDaemon` uses the Telemetry Gateway provider interface and `CompositeEventNormalizer` pipeline.
+
+---
+
 ## [0.3.1] — Sentinel Core Hotfix (2026-08-23)
 
 > *"Reliability in the breach. Precision in defense."*

@@ -1,17 +1,11 @@
-from __future__ import annotations
+"""Telemetry Gateway collectors and normalizers."""
 
-from bastion.collector.journal import JournalCollector, JournalError
-from bastion.collector.ssh import SSHLogParser
-from bastion.infrastructure.telemetry.adapters.composite import CompositeEventNormalizer
-from bastion.infrastructure.telemetry.adapters.ssh import SSHLogAdapter
+from bastion.infrastructure.telemetry.adapters import CompositeEventNormalizer, SSHLogAdapter
 from bastion.infrastructure.telemetry.file import FileCollector
 from bastion.infrastructure.telemetry.journald import JournaldCollector, JournaldCollectorError
 from bastion.infrastructure.telemetry.stdin import StdinCollector
 
 __all__ = [
-    "JournalCollector",
-    "JournalError",
-    "SSHLogParser",
     "JournaldCollector",
     "JournaldCollectorError",
     "StdinCollector",
