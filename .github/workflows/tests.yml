@@ -33,7 +33,16 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
+          pip install build
+
+      - name: Validate installer shell scripts syntax
+        run: |
+          bash -n installer/*.sh installer/lib/*.sh
 
       - name: Run pytest test suite
         run: |
           pytest -v --tb=short
+
+      - name: Validate package build
+        run: |
+          python -m build --sdist --wheel
