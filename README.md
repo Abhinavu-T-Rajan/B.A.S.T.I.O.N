@@ -4,74 +4,48 @@
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Version: v0.3.1 (Sentinel Core)](https://img.shields.io/badge/version-0.3.1%20(Sentinel%20Core)-brightgreen.svg)]()
-[![Tests: 140 Passed](https://img.shields.io/badge/tests-140%20passed-brightgreen.svg)]()
+[![Version: v0.4.0 (Gateway)](https://img.shields.io/badge/version-0.4.0%20(Gateway)-brightgreen.svg)]()
+[![Tests: 154 Passed](https://img.shields.io/badge/tests-154%20passed-brightgreen.svg)]()
 
-> *"Sentinel sees. Aegis analyzes. Guardian protects. Oracle understands. Sentinel Core endures."*
+> *"Separate what B.A.S.T.I.O.N. does from how B.A.S.T.I.O.N. implements it."*
 
-B.A.S.T.I.O.N. is an autonomous, explainable host-level **Intrusion Detection, Prevention & Threat Correlation Platform (IDS/IPS/SOAR)** designed for Linux environments. Running as a hardened, persistent systemd service, it continuously monitors authentication telemetry, detects anomalous behavior across multiple attack vectors, correlates signals with Indicators of Compromise (IOCs), maps threats to MITRE ATT&CK techniques, manages incidents, and enforces audited firewall isolation.
+B.A.S.T.I.O.N. is an autonomous, explainable host-level **Intrusion Detection, Prevention & Threat Correlation Platform (IDS/IPS/SOAR)** designed for Linux environments. Built upon a clean modular core, it isolates domain capabilities from driver implementations through standardized provider interfaces (`CollectorProvider`, `Detector`, `ResponseProvider`, `FirewallProvider`, `StorageProvider`).
 
 ---
 
 ## Architecture Overview
 
 ```
-                         B.A.S.T.I.O.N. v0.3.1 (Sentinel Core)
-                                           │
-                     ┌─────────────────────▼─────────────────────┐
-                     │          systemd Service Layer            │ (bastion.service, sandboxing,
-                     │  (CAP_NET_ADMIN, NoNewPrivileges, strict) │  Restart=on-failure recovery)
-                     └─────────────────────┬─────────────────────┘
-                                           │
-                     ┌─────────────────────▼─────────────────────┐
-                     │          BastionDaemon Orchestrator       │ (Service Lifecycle, HealthTracker,
-                     │                                           │  Worker Thread, Signal Handling)
-                     └─────────────────────┬─────────────────────┘
-                                           │
-                     ┌─────────────────────▼─────────────────────┐
-                     │              Telemetry Layer              │ (systemd-journald / sshd / stdin /
-                     │                                           │  file streaming with retry logic)
-                     └─────────────────────┬─────────────────────┘
-                                           │
-                     ┌─────────────────────▼─────────────────────┐
-                     │          Normalized SecurityEvents        │ (SecurityEvent normalization)
-                     └─────────────────────┬─────────────────────┘
-                                           │
-                     ┌─────────────────────▼─────────────────────┐
-                     │          Behavioral Detection Engine      │ (Brute-Force, Spray, Enum, Burst)
-                     └─────────────────────┬─────────────────────┘
-                                           │
-                     ┌─────────────────────▼─────────────────────┐
-                     │         Threat Intelligence Subsystem     │ (IOC Validation, Storage & Match)
-                     └─────────────────────┬─────────────────────┘
-                                           │
-                     ┌─────────────────────▼─────────────────────┐
-                     │            Threat Risk Engine             │ (Multi-signal 0–100 Explainable)
-                     └─────────────────────┬─────────────────────┘
-                                           │
-                     ┌─────────────────────▼─────────────────────┐
-                     │         Threat Correlation Engine         │ (ATT&CK Mapping, Incidents,
-                     │                                           │  Alert Deduplication, Timelines)
-                     └─────────────────────┬─────────────────────┘
-                                           │
-                     ┌─────────────────────▼─────────────────────┐
-                     │              Policy Engine                │ (CIDR Allowlist, Ban Thresholds)
-                     └─────────────────────┬─────────────────────┘
-                                           │
-                     ┌─────────────────────▼─────────────────────┐
-                     │             Response Engine               │ (Dry-Run, Automatic, Manual)
-                     ├───────────────────────────────────────────┤
-                     │ • Ban Manager (State Machine, Expirations)│
-                     │ • FirewallReconciler (Rule Reconciliation)│
-                     │ • Experimental Response (Audited Actions) │
-                     └─────────────────────┬─────────────────────┘
-                                           │
-                     ┌─────────────────────▼─────────────────────┐
-                     │             Firewall Backend              │
-                     ├───────────────────────────────────────────┤
-                     │ • NFTablesBackend ('inet bastion' table)  │
-                     │ • MockFirewallBackend (Dev / Non-root)    │
-                     └───────────────────────────────────────────┘
+                                  B.A.S.T.I.O.N. v0.4.0 (Gateway)
+                                                 │
+                 ┌───────────────────────────────┴───────────────────────────────┐
+                 │                   Application Service Layer                   │
+                 ├───────────────────────────────────────────────────────────────┤
+                 │ • DefenseAppService      • IntelligenceAppService             │
+                 │ • IncidentAppService     • HealthAppService                   │
+                 │ • SentinelPipeline       (Unified Event & Defense Pipeline)   │
+                 └───────────────────────────────┬───────────────────────────────┘
+                                                 │
+        ┌────────────────────────┬───────────────┴───────────────┬────────────────────────┐
+        │                        │                               │                        │
+┌───────▼────────┐      ┌────────▼────────┐             ┌────────▼────────┐      ┌────────▼────────┐
+│   Telemetry    │      │    Behavioral   │             │   Defensive     │      │   Persistence   │
+│   Gateway      │      │    Detectors    │             │   Response      │      │   Storage       │
+├────────────────┤      ├─────────────────┤             ├─────────────────┤      ├─────────────────┤
+│ Collector      │      │ Detector        │             │ Response        │      │ Storage         │
+│ Provider       │      │ Provider        │             │ Provider        │      │ Provider        │
+│                │      │                 │             │                 │      │                 │
+│ • Journald     │      │ • Brute-Force   │             │ • Policy Engine │      │ • SQLiteStorage │
+│ • Stdin        │      │ • Spray         │             │ • Ban Manager   │      │   (Migrations)  │
+│ • File         │      │ • Enumeration   │             │ • Reconciler    │      │                 │
+│                │      │ • Burst         │             │                 │      │                 │
+│ RawTelemetry   │      │ • Custom Plugin │             │ Firewall        │      │                 │
+│       │        │      └─────────────────┘             │ Provider        │      │                 │
+│ Adapters &     │                                      ├─────────────────┤      │                 │
+│ Normalizers    │                                      │ • NFTables      │      │                 │
+│       ▼        │                                      │ • MockBackend   │      │                 │
+│ SecurityEvent  │                                      └─────────────────┘      │                 │
+└────────────────┘                                                               └─────────────────┘
 ```
 
 For complete technical documentation on the internal pipeline and subsystem interfaces, refer to the [System Architecture Guide](docs/architecture.md).
@@ -80,7 +54,7 @@ For complete technical documentation on the internal pipeline and subsystem inte
 
 ## Documentation
 
-- **[System Architecture](docs/architecture.md)**: Detailed breakdown of the daemon runner, health tracker, firewall reconciler, pipeline, and subsystem contracts.
+- **[System Architecture](docs/architecture.md)**: Detailed breakdown of the modular core, provider contracts, telemetry gateway, and application services.
 - **[Development Guide](DEVELOPMENT.md)**: Developer environment setup, architectural conventions, and contribution workflows.
 - **[Developer Setup](docs/development/setup.md)** & **[Testing Guide](docs/development/testing.md)**: Environment setup and testing workflows.
 - **[Operations & Installation](docs/operations/installation.md)**: Systemd service deployment, directory layout, and privilege configuration.

@@ -7,16 +7,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from bastion.version import __version__
-from bastion.attack.registry import AttackRegistry
-from bastion.collector.journal import JournalCollector, JournalError
-from bastion.collector.ssh import SSHLogParser
 from bastion.config import (
     BastionConfig,
     ConfigValidationError,
     load_config,
     validate_config,
 )
+from bastion.core.contracts.collector import CollectorProvider
+from bastion.core.contracts.firewall import FirewallProvider
+from bastion.core.contracts.storage import StorageProvider
 from bastion.daemon.runner import BastionDaemon
 from bastion.daemon.state import (
     DaemonHealthSnapshot,
@@ -26,18 +25,17 @@ from bastion.daemon.state import (
     Subsystem,
     SubsystemHealth,
 )
-from bastion.detection.brute_force import BruteForceDetector, DetectionResult
+from bastion.detection.base import DetectionResult
+from bastion.detection.brute_force import BruteForceDetector
 from bastion.detection.burst import BurstDetector
 from bastion.detection.engine import DetectionEngine
 from bastion.detection.enumeration import UsernameEnumerationDetector
 from bastion.detection.password_spray import PasswordSprayDetector
-from bastion.firewall.base import FirewallBackend
 from bastion.firewall.mock import MockFirewallBackend
 from bastion.firewall.nftables import NFTablesBackend
-from bastion.incidents.manager import IncidentManager
-from bastion.incidents.models import Incident, IncidentStatus
-from bastion.intelligence.manager import IOCManager
-from bastion.intelligence.models import IOCRecord, IOCStatus, IOCType, Provenance
+from bastion.infrastructure.telemetry.file import FileCollector
+from bastion.infrastructure.telemetry.journald import JournaldCollector
+from bastion.infrastructure.telemetry.stdin import StdinCollector
 from bastion.models.actors import (
     ActorState,
     RecommendedAction,
@@ -45,11 +43,8 @@ from bastion.models.actors import (
     ThreatActorProfile,
 )
 from bastion.models.events import EventType, SecurityEvent, ServiceType
-from bastion.pipeline import SentinelPipeline
-from bastion.response.audit import ResponseAuditRecord
 from bastion.response.ban_manager import BanManager
 from bastion.response.engine import ResponseEngine
-from bastion.response.experimental import ExperimentalResponseCoordinator
 from bastion.response.models import (
     BanRecord,
     BanStatus,
@@ -58,10 +53,15 @@ from bastion.response.models import (
     ResponseMode,
 )
 from bastion.response.policy import PolicyConfig, PolicyEngine
-from bastion.risk.scorer import RiskEngine, RiskScoringConfig
+from bastion.risk.scorer import RiskEngine
+from bastion.services.defense import DefenseAppService
+from bastion.services.health import HealthAppService
+from bastion.services.incidents import IncidentAppService
+from bastion.services.intelligence import IntelligenceAppService
+from bastion.services.pipeline import SentinelPipeline
 from bastion.storage.migrations import MigrationRunner
 from bastion.storage.sqlite import SQLiteStorage
-from bastion.timeline.generator import TimelineGenerator
+from bastion.version import __version__
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -458,7 +458,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _get_firewall_backend(cfg: BastionConfig, backend_override: str | None = None) -> FirewallBackend:
+def _get_firewall_backend(cfg: BastionConfig, backend_override: str | None = None) -> FirewallProvider:
     """Instantiate appropriate firewall backend based on CLI flag or config."""
     choice = backend_override or cfg.response.backend
     if choice == "mock":
@@ -486,7 +486,7 @@ def _get_config_from_args(args: argparse.Namespace) -> BastionConfig:
 
 
 # =====================================================================
-# CLI Command Handlers
+# CLI Command Handlers (Thin Delegates to Application Services)
 # =====================================================================
 
 def command_daemon(args: argparse.Namespace) -> int:
@@ -513,83 +513,19 @@ def command_daemon(args: argparse.Namespace) -> int:
 def command_health(args: argparse.Namespace) -> int:
     """Display operational health diagnostics across all subsystems."""
     cfg = _get_config_from_args(args)
-    snapshot = HealthTracker.load_from_file(cfg.daemon.health_state_path)
+    snapshot = HealthAppService.load_snapshot(cfg.daemon.health_state_path)
 
     if snapshot is None:
-        # Perform live diagnostic health probe
-        tracker = HealthTracker(
-            response_mode=cfg.response.mode.upper(),
-            firewall_backend=cfg.response.backend.upper(),
-        )
-        tracker.set_service_state(ServiceState.STOPPED)
-
-        # 1. Database check
-        try:
-            storage = SQLiteStorage(cfg.storage.db_path)
-            stats = storage.get_stats()
-            tracker.set_subsystem_health(
-                Subsystem.DATABASE,
-                HealthStatus.HEALTHY,
-                f"SQLite ready ({stats['total_events']} events, {stats['active_bans']} bans)",
-            )
-            tracker.set_active_bans_count(stats["active_bans"])
-            storage.close()
-        except Exception as exc:
-            tracker.set_subsystem_health(
-                Subsystem.DATABASE, HealthStatus.FAILED, f"Storage error: {exc}"
-            )
-
-        # 2. Firewall check
+        storage = SQLiteStorage(cfg.storage.db_path)
         fw = _get_firewall_backend(cfg, getattr(args, "backend", None))
-        is_auto = cfg.response.mode.lower() == "automatic"
-        if fw.is_available():
-            tracker.set_subsystem_health(
-                Subsystem.FIREWALL,
-                HealthStatus.HEALTHY,
-                f"Backend '{fw.name}' available",
-            )
-        else:
-            fw_st = HealthStatus.FAILED if is_auto else HealthStatus.DEGRADED
-            tracker.set_subsystem_health(
-                Subsystem.FIREWALL,
-                fw_st,
-                f"Backend '{fw.name}' unavailable",
-            )
-
-        # 3. Detection & Response check
-        val_errors = validate_config(cfg)
-        if not val_errors:
-            tracker.set_subsystem_health(Subsystem.DETECTION, HealthStatus.HEALTHY, "Detectors configured")
-            tracker.set_subsystem_health(Subsystem.THREAT_INTEL, HealthStatus.HEALTHY, "Threat Intel ready")
-            if is_auto and not fw.is_available():
-                tracker.set_subsystem_health(
-                    Subsystem.RESPONSE,
-                    HealthStatus.DEGRADED,
-                    "Automatic enforcement disabled; firewall unavailable",
-                )
-            else:
-                tracker.set_subsystem_health(
-                    Subsystem.RESPONSE, HealthStatus.HEALTHY, f"Mode: {cfg.response.mode.upper()}"
-                )
-        else:
-            tracker.set_subsystem_health(Subsystem.DETECTION, HealthStatus.DEGRADED, "Config warnings")
-
-        # 4. Telemetry check
-        if cfg.telemetry.source == "journald":
-            if JournalCollector.is_available():
-                tracker.set_subsystem_health(Subsystem.TELEMETRY, HealthStatus.HEALTHY, f"journalctl available")
-            else:
-                tracker.set_subsystem_health(Subsystem.TELEMETRY, HealthStatus.DEGRADED, "journalctl unavailable")
-        else:
-            tracker.set_subsystem_health(Subsystem.TELEMETRY, HealthStatus.HEALTHY, f"Source: {cfg.telemetry.source}")
-
-        snapshot = tracker.get_snapshot()
+        snapshot = HealthAppService.probe_live_health(cfg, storage, fw)
+        storage.close()
 
     if getattr(args, "json", False):
         import json
         print(json.dumps(snapshot.to_dict(), indent=2))
     else:
-        print(HealthTracker.format_health_report(snapshot))
+        print(HealthAppService.format_report(snapshot))
 
     return 0 if snapshot.overall_health != HealthStatus.FAILED else 1
 
@@ -600,31 +536,29 @@ def command_config_validate(args: argparse.Namespace) -> int:
         cfg = _get_config_from_args(args)
         errors = validate_config(cfg)
         if errors:
-            print(f"❌ Configuration validation failed with {len(errors)} error(s):")
+            print("❌ Configuration validation failed:")
             for err in errors:
                 print(f"  • {err}")
             return 1
-        print(f"✓ Configuration is valid (format version {cfg.config_version})")
-        if cfg.loaded_from:
-            print(f"  Loaded from: {cfg.loaded_from}")
+        print("✓ Configuration is valid and all parameter constraints are satisfied.")
         return 0
+    except ConfigValidationError as exc:
+        print(f"❌ Configuration error: {exc}")
+        return 1
     except Exception as exc:
-        print(f"❌ Configuration load/validation error: {exc}")
+        print(f"❌ Failed to load configuration: {exc}")
         return 1
 
 
 def command_db_init(args: argparse.Namespace) -> int:
-    """Initialize SQLite database schema and run migrations."""
+    """Initialize database schemas and apply pending migrations."""
+    cfg = _get_config_from_args(args)
+    db_path = cfg.storage.db_path
     try:
-        cfg = _get_config_from_args(args)
-        db_path = cfg.storage.db_path
         storage = SQLiteStorage(db_path)
-        stats = storage.get_stats()
         print("✓ SQLite database schema initialized and migrated successfully.")
         print(f"  Database Path  : {db_path}")
         print(f"  Schema Version : {MigrationRunner.CURRENT_VERSION}")
-        print(f"  Total Events   : {stats['total_events']}")
-        print(f"  Active Bans    : {stats['active_bans']}")
         storage.close()
         return 0
     except Exception as exc:
@@ -633,10 +567,10 @@ def command_db_init(args: argparse.Namespace) -> int:
 
 
 def command_db_status(args: argparse.Namespace) -> int:
-    """Show database schema and migration status."""
+    """Inspect database schema migration version and table record counts."""
+    cfg = _get_config_from_args(args)
+    db_path = cfg.storage.db_path
     try:
-        cfg = _get_config_from_args(args)
-        db_path = cfg.storage.db_path
         storage = SQLiteStorage(db_path)
         stats = storage.get_stats()
         print("=" * 64)
@@ -646,8 +580,8 @@ def command_db_status(args: argparse.Namespace) -> int:
         print(f" Schema Version : {MigrationRunner.CURRENT_VERSION}")
         print(f" Total Events   : {stats['total_events']}")
         print(f" Threat Actors  : {stats['total_threat_actors']}")
-        print(f" Active Bans    : {stats['active_bans']}")
-        print(f" Active IOCs    : {stats['active_iocs']}")
+        print(f" Active Bans      : {stats['active_bans']}")
+        print(f" Active IOCs      : {stats['active_iocs']}")
         print(f" Open Incidents : {stats['open_incidents']}")
         print("=" * 64)
         storage.close()
@@ -660,12 +594,12 @@ def command_db_status(args: argparse.Namespace) -> int:
 def command_status(args: argparse.Namespace) -> int:
     """Show operational status and subsystem health."""
     cfg = _get_config_from_args(args)
-    db_path = cfg.storage.db_path
-    storage = SQLiteStorage(db_path)
+    storage = SQLiteStorage(cfg.storage.db_path)
     fw = _get_firewall_backend(cfg, getattr(args, "backend", None))
-    stats = storage.get_stats()
+    defense_svc = DefenseAppService(storage=storage, firewall=fw)
+    overview = defense_svc.get_status_overview(response_mode=cfg.response.mode)
 
-    snapshot = HealthTracker.load_from_file(cfg.daemon.health_state_path)
+    snapshot = HealthAppService.load_snapshot(cfg.daemon.health_state_path)
     if snapshot and snapshot.service_state == ServiceState.RUNNING:
         if snapshot.overall_health == HealthStatus.DEGRADED:
             status_line = f"DEGRADED (Sentinel Core v{__version__})"
@@ -674,7 +608,7 @@ def command_status(args: argparse.Namespace) -> int:
         else:
             status_line = f"RUNNING (Sentinel Core v{__version__})"
     else:
-        if cfg.response.mode.lower() == "automatic" and not fw.is_available():
+        if cfg.response.mode.lower() == "automatic" and not overview["firewall_available"]:
             status_line = f"DEGRADED (Sentinel Core v{__version__}) - Firewall unavailable"
         else:
             status_line = f"DEVELOPMENT (Sentinel Core v{__version__})"
@@ -684,30 +618,36 @@ def command_status(args: argparse.Namespace) -> int:
     print(f" Status      : {status_line}")
     print(f" Mode        : INTRUSION PREVENTION & THREAT ISOLATION")
     print("=" * 64)
-    print(f" Database         : {db_path}")
-    print(f" Response Mode    : {cfg.response.mode.upper()}")
-    print(f" Firewall Backend : {fw.name} ({'Available' if fw.is_available() else 'Unavailable'})")
-    print(f" Total Events     : {stats['total_events']}")
-    print(f" Detections       : {stats['total_detections']}")
-    print(f" Threat Actors    : {stats['total_threat_actors']} ({stats['active_threats']} active high/critical)")
-    print(f" Active Bans      : {stats['active_bans']}")
-    print(f" Active IOCs      : {stats['active_iocs']}")
-    print(f" Open Incidents   : {stats['open_incidents']}")
+    print(f" Database         : {cfg.storage.db_path}")
+    print(f" Response Mode    : {overview['response_mode']}")
+    print(f" Firewall Backend : {overview['firewall_backend']} ({'Available' if overview['firewall_available'] else 'Unavailable'})")
+    print(f" Total Events     : {overview['total_events']}")
+    print(f" Detections       : {overview['total_detections']}")
+    print(f" Threat Actors    : {overview['total_threat_actors']} ({overview['active_threats']} active high/critical)")
+    print(f" Active Bans      : {overview['active_bans']}")
+    print(f" Active IOCs      : {overview['active_iocs']}")
+    print(f" Open Incidents   : {overview['open_incidents']}")
     print("=" * 64)
+    storage.close()
     return 0
 
 
 def command_threats(args: argparse.Namespace) -> int:
     """List tracked threat actors and risk scores."""
     cfg = _get_config_from_args(args)
-    db_path = cfg.storage.db_path
-    storage = SQLiteStorage(db_path)
+    storage = SQLiteStorage(cfg.storage.db_path)
+    fw = _get_firewall_backend(cfg, getattr(args, "backend", None))
+    defense_svc = DefenseAppService(storage=storage, firewall=fw)
 
-    sev_enum = Severity(args.severity.lower()) if getattr(args, "severity", None) else None
-    actors = storage.list_threat_actors(min_score=getattr(args, "min_score", 0), severity=sev_enum, limit=getattr(args, "limit", 25))
+    actors = defense_svc.list_threats(
+        min_score=getattr(args, "min_score", 0),
+        limit=getattr(args, "limit", 25),
+        severity=getattr(args, "severity", None),
+    )
 
     if not actors:
         print("No threat actors matching criteria.")
+        storage.close()
         return 0
 
     print(f"{'SOURCE IP':<18} {'SCORE':<7} {'SEVERITY':<10} {'STATE':<14} {'FAILURES':<10} {'ACTION':<20} {'LAST SEEN'}")
@@ -715,22 +655,25 @@ def command_threats(args: argparse.Namespace) -> int:
     for a in actors:
         last_str = a.last_seen.strftime("%Y-%m-%d %H:%M:%S")
         print(f"{a.source_ip:<18} {a.threat_score:<7} {a.severity.value.upper():<10} {a.state.value:<14} {a.auth_failures:<10} {a.recommended_action.value:<20} {last_str}")
+    storage.close()
     return 0
 
 
 def command_inspect(args: argparse.Namespace) -> int:
     """Inspect forensic details and score factors for a specific IP."""
     cfg = _get_config_from_args(args)
-    db_path = cfg.storage.db_path
-    storage = SQLiteStorage(db_path)
+    storage = SQLiteStorage(cfg.storage.db_path)
+    fw = _get_firewall_backend(cfg, getattr(args, "backend", None))
+    defense_svc = DefenseAppService(storage=storage, firewall=fw)
 
-    actor = storage.get_threat_actor(args.source_ip)
+    data = defense_svc.inspect_ip(args.source_ip)
+    actor = data["profile"]
     if not actor:
         print(f"No threat actor record found for IP: {args.source_ip}")
+        storage.close()
         return 1
 
-    ban = storage.get_ban_by_ip(args.source_ip)
-
+    ban = data["active_ban"]
     print("=" * 64)
     print(f" Threat Actor Forensic Profile: {actor.source_ip}")
     print("=" * 64)
@@ -758,20 +701,21 @@ def command_inspect(args: argparse.Namespace) -> int:
     else:
         print("   • No active risk factors recorded.")
     print("=" * 64)
+    storage.close()
     return 0
 
 
 def command_bans(args: argparse.Namespace) -> int:
     """List active or historical host isolation bans."""
     cfg = _get_config_from_args(args)
-    db_path = cfg.storage.db_path
-    storage = SQLiteStorage(db_path)
+    storage = SQLiteStorage(cfg.storage.db_path)
+    fw = _get_firewall_backend(cfg, getattr(args, "backend", None))
+    defense_svc = DefenseAppService(storage=storage, firewall=fw)
 
-    status_filter = None if getattr(args, "all", False) else BanStatus.ACTIVE
-    bans = storage.list_bans(status=status_filter, limit=getattr(args, "limit", 50))
-
+    bans = defense_svc.list_bans(active_only=not getattr(args, "all", False), limit=getattr(args, "limit", 50))
     if not bans:
         print("No ban records found.")
+        storage.close()
         return 0
 
     print(f"{'BAN ID':<14} {'SOURCE IP':<18} {'STATUS':<10} {'SCORE':<7} {'ACTION':<20} {'EXPIRES AT'}")
@@ -779,108 +723,125 @@ def command_bans(args: argparse.Namespace) -> int:
     for b in bans:
         exp_str = b.expires_at.strftime("%Y-%m-%d %H:%M:%S") if b.expires_at else "Permanent"
         print(f"{b.ban_id:<14} {b.source_ip:<18} {b.status.value.upper():<10} {b.threat_score:<7} {b.action.value:<20} {exp_str}")
+    storage.close()
     return 0
 
 
 def command_ban(args: argparse.Namespace) -> int:
     """Manually isolate an IP address."""
     cfg = _get_config_from_args(args)
-    db_path = cfg.storage.db_path
-    storage = SQLiteStorage(db_path)
+    storage = SQLiteStorage(cfg.storage.db_path)
     fw = _get_firewall_backend(cfg, getattr(args, "backend", None))
-    ban_mgr = BanManager(storage=storage, firewall=fw)
+    defense_svc = DefenseAppService(storage=storage, firewall=fw)
 
-    dur = None if getattr(args, "permanent", False) else getattr(args, "duration", 900)
-    record = ban_mgr.create_ban(
+    success, msg, record = defense_svc.ban_ip(
         source_ip=args.ip,
+        duration_seconds=getattr(args, "duration", 900),
+        permanent=getattr(args, "permanent", False),
         reason=getattr(args, "reason", "Manual operator ban"),
-        threat_score=100 if getattr(args, "permanent", False) else 85,
-        duration_seconds=dur,
-        action=ResponseAction.PERMANENT_BAN if getattr(args, "permanent", False) else ResponseAction.TEMPORARY_ISOLATION,
     )
-
-    exp_str = f"for {args.duration}s" if dur else "permanently"
-    print(f"✓ {args.ip} successfully isolated {exp_str} (Ban ID: {record.ban_id})")
-    return 0
+    if success and record:
+        exp_str = f"for {args.duration}s" if record.duration_seconds else "permanently"
+        print(f"✓ {args.ip} successfully isolated {exp_str} (Ban ID: {record.ban_id})")
+        storage.close()
+        return 0
+    else:
+        print(f"❌ Failed to ban {args.ip}: {msg}")
+        storage.close()
+        return 1
 
 
 def command_unban(args: argparse.Namespace) -> int:
     """Release an active ban and unblock IP."""
     cfg = _get_config_from_args(args)
-    db_path = cfg.storage.db_path
-    storage = SQLiteStorage(db_path)
+    storage = SQLiteStorage(cfg.storage.db_path)
     fw = _get_firewall_backend(cfg, getattr(args, "backend", None))
-    ban_mgr = BanManager(storage=storage, firewall=fw)
+    defense_svc = DefenseAppService(storage=storage, firewall=fw)
 
-    success = ban_mgr.unban(args.ip)
+    success, msg = defense_svc.unban_ip(args.ip, reason="Manual operator unban")
     if success:
         print(f"✓ {args.ip} successfully released from isolation.")
+        storage.close()
         return 0
     else:
         print(f"No active ban record found for IP: {args.ip}")
+        storage.close()
         return 1
 
 
 def command_firewall_status(args: argparse.Namespace) -> int:
     """Show firewall table rules and active blacklist sets."""
     cfg = _get_config_from_args(args)
+    storage = SQLiteStorage(cfg.storage.db_path)
     fw = _get_firewall_backend(cfg, getattr(args, "backend", None))
+    defense_svc = DefenseAppService(storage=storage, firewall=fw)
 
+    st = defense_svc.get_firewall_status()
     print("=" * 64)
     print(" B.A.S.T.I.O.N. Firewall Status")
     print("=" * 64)
-    print(f" Backend Name : {fw.name.upper()}")
-    print(f" Available    : {'Yes' if fw.is_available() else 'No'}")
+    print(f" Backend Name : {st['backend_name'].upper()}")
+    print(f" Available    : {'Yes' if st['available'] else 'No'}")
 
-    blocked = fw.list_blocked_ips()
+    blocked = st["blocked_ips"]
     print(f" Blocked IPs  : {len(blocked)}")
     if blocked:
         for ip in blocked:
             print(f"   • {ip}")
     print("=" * 64)
+    storage.close()
     return 0
 
 
 def command_firewall_flush(args: argparse.Namespace) -> int:
     """Flush all B.A.S.T.I.O.N. firewall blacklist entries."""
     cfg = _get_config_from_args(args)
+    storage = SQLiteStorage(cfg.storage.db_path)
     fw = _get_firewall_backend(cfg, getattr(args, "backend", None))
-    fw.flush()
-    print(f"✓ B.A.S.T.I.O.N. firewall blacklist rules successfully flushed ({fw.name.upper()}).")
-    return 0
+    defense_svc = DefenseAppService(storage=storage, firewall=fw)
+
+    success, msg = defense_svc.flush_firewall()
+    if success:
+        print(f"✓ B.A.S.T.I.O.N. firewall blacklist rules successfully flushed ({fw.name.upper()}).")
+        storage.close()
+        return 0
+    else:
+        print(f"❌ {msg}")
+        storage.close()
+        return 1
 
 
 def command_incident_list(args: argparse.Namespace) -> int:
     """List security incidents."""
     cfg = _get_config_from_args(args)
-    db_path = cfg.storage.db_path
-    storage = SQLiteStorage(db_path)
-    inc_mgr = IncidentManager(storage)
+    storage = SQLiteStorage(cfg.storage.db_path)
+    inc_svc = IncidentAppService(storage)
 
-    st_enum = IncidentStatus(args.status.lower()) if getattr(args, "status", None) else None
-    incidents = inc_mgr.list_incidents(status=st_enum, limit=getattr(args, "limit", 25))
+    incidents = inc_svc.list_incidents(status=getattr(args, "status", None), limit=getattr(args, "limit", 25))
 
     if not incidents:
         print("No incidents found.")
+        storage.close()
         return 0
 
     print(f"{'INCIDENT ID':<14} {'STATUS':<14} {'SEVERITY':<10} {'RISK':<6} {'TITLE'}")
     print("-" * 80)
     for inc in incidents:
         print(f"{inc.incident_id:<14} {inc.status.value.upper():<14} {inc.severity.value.upper():<10} {inc.risk_score:<6} {inc.title}")
+    storage.close()
     return 0
 
 
 def command_incident_inspect(args: argparse.Namespace) -> int:
     """Inspect an incident in detail."""
     cfg = _get_config_from_args(args)
-    db_path = cfg.storage.db_path
-    storage = SQLiteStorage(db_path)
-    inc_mgr = IncidentManager(storage)
+    storage = SQLiteStorage(cfg.storage.db_path)
+    inc_svc = IncidentAppService(storage)
 
-    inc = inc_mgr.get_incident(args.incident_id)
+    inc = inc_svc.get_incident(args.incident_id)
     if not inc:
         print(f"Incident '{args.incident_id}' not found.")
+        storage.close()
         return 1
 
     print("=" * 64)
@@ -898,136 +859,141 @@ def command_incident_inspect(args: argparse.Namespace) -> int:
     if inc.ioc_ids:
         print(f" Associated IOCs: {', '.join(inc.ioc_ids)}")
     print("=" * 64)
+    storage.close()
     return 0
 
 
 def command_incident_update(args: argparse.Namespace) -> int:
     """Update incident status."""
     cfg = _get_config_from_args(args)
-    db_path = cfg.storage.db_path
-    storage = SQLiteStorage(db_path)
-    inc_mgr = IncidentManager(storage)
+    storage = SQLiteStorage(cfg.storage.db_path)
+    inc_svc = IncidentAppService(storage)
 
-    st_enum = IncidentStatus(args.status.lower())
-    inc = inc_mgr.update_status(args.incident_id, st_enum, notes=getattr(args, "notes", ""))
-    if not inc:
-        print(f"Incident '{args.incident_id}' not found.")
+    success, msg = inc_svc.update_status(args.incident_id, args.status, resolution_notes=getattr(args, "notes", None))
+    if not success:
+        print(f"❌ {msg}")
+        storage.close()
         return 1
-    print(f"✓ Updated incident '{args.incident_id}' status to {st_enum.value.upper()}.")
+    print(f"✓ {msg}")
+    storage.close()
     return 0
 
 
 def command_incident_create(args: argparse.Namespace) -> int:
     """Create a manual incident."""
     cfg = _get_config_from_args(args)
-    db_path = cfg.storage.db_path
-    storage = SQLiteStorage(db_path)
-    inc_mgr = IncidentManager(storage)
+    storage = SQLiteStorage(cfg.storage.db_path)
+    inc_svc = IncidentAppService(storage)
 
     actors = [a.strip() for a in args.actors.split(",")] if getattr(args, "actors", None) else []
-    inc = inc_mgr.create_incident(
+    inc = inc_svc.create_incident(
         title=args.title,
-        severity=Severity(args.severity.lower()),
-        risk_score=args.risk,
-        actors=actors,
-        summary=getattr(args, "summary", ""),
+        severity=args.severity,
+        description=getattr(args, "summary", ""),
+        actor_ips=actors,
     )
     print(f"✓ Created incident {inc.incident_id}: {inc.title}")
+    storage.close()
     return 0
 
 
 def command_ioc_add(args: argparse.Namespace) -> int:
     """Add a new IOC record."""
     cfg = _get_config_from_args(args)
-    db_path = cfg.storage.db_path
-    storage = SQLiteStorage(db_path)
-    ioc_mgr = IOCManager(storage)
+    storage = SQLiteStorage(cfg.storage.db_path)
+    intel_svc = IntelligenceAppService(storage)
 
     tags = [t.strip() for t in args.tags.split(",")] if getattr(args, "tags", None) else []
-    try:
-        record = ioc_mgr.add_ioc(
-            ioc_type=IOCType(args.type.lower()),
-            value=args.value,
-            confidence=args.confidence,
-            source=getattr(args, "source", "operator"),
-            provenance=Provenance.CONFIGURED,
-            tags=tags,
-            notes=getattr(args, "notes", ""),
-        )
+    success, msg, record = intel_svc.add_ioc(
+        ioc_type=args.type,
+        value=args.value,
+        description=getattr(args, "notes", ""),
+        confidence=args.confidence,
+        tags=tags,
+    )
+    if success and record:
         print(f"✓ Added IOC [{record.ioc_type.value}:{record.value}] (ID: {record.ioc_id})")
+        storage.close()
         return 0
-    except Exception as exc:
-        print(f"Error adding IOC: {exc}")
+    else:
+        print(f"Error adding IOC: {msg}")
+        storage.close()
         return 1
 
 
 def command_ioc_list(args: argparse.Namespace) -> int:
     """List IOC records."""
     cfg = _get_config_from_args(args)
-    db_path = cfg.storage.db_path
-    storage = SQLiteStorage(db_path)
-    ioc_mgr = IOCManager(storage)
+    storage = SQLiteStorage(cfg.storage.db_path)
+    intel_svc = IntelligenceAppService(storage)
 
-    type_enum = IOCType(args.type.lower()) if getattr(args, "type", None) else None
-    st_enum = IOCStatus(args.status.lower()) if getattr(args, "status", None) else None
-    iocs = ioc_mgr.list_iocs(ioc_type=type_enum, status=st_enum, limit=getattr(args, "limit", 50))
-
+    iocs = intel_svc.list_iocs(active_only=not getattr(args, "all", False), limit=getattr(args, "limit", 50))
     if not iocs:
         print("No IOCs found.")
+        storage.close()
         return 0
 
     print(f"{'IOC ID':<14} {'TYPE':<12} {'CONF':<5} {'VALUE':<30} {'STATUS':<10} {'TAGS'}")
     print("-" * 85)
     for i in iocs:
         print(f"{i.ioc_id:<14} {i.ioc_type.value:<12} {i.confidence:<5} {i.value:<30} {i.status.value:<10} {','.join(i.tags)}")
+    storage.close()
     return 0
 
 
 def command_ioc_search(args: argparse.Namespace) -> int:
     """Search IOCs."""
     cfg = _get_config_from_args(args)
-    db_path = cfg.storage.db_path
-    storage = SQLiteStorage(db_path)
-    ioc_mgr = IOCManager(storage)
+    storage = SQLiteStorage(cfg.storage.db_path)
+    intel_svc = IntelligenceAppService(storage)
 
-    iocs = ioc_mgr.search_iocs(args.query, limit=getattr(args, "limit", 50))
+    iocs = intel_svc.search_iocs(args.query)
     if not iocs:
         print(f"No IOCs found matching '{args.query}'.")
+        storage.close()
         return 0
 
     print(f"{'IOC ID':<14} {'TYPE':<12} {'CONF':<5} {'VALUE':<30} {'STATUS':<10}")
     print("-" * 75)
     for i in iocs:
         print(f"{i.ioc_id:<14} {i.ioc_type.value:<12} {i.confidence:<5} {i.value:<30} {i.status.value:<10}")
+    storage.close()
     return 0
 
 
 def command_ioc_delete(args: argparse.Namespace) -> int:
     """Delete an IOC."""
     cfg = _get_config_from_args(args)
-    db_path = cfg.storage.db_path
-    storage = SQLiteStorage(db_path)
-    ioc_mgr = IOCManager(storage)
+    storage = SQLiteStorage(cfg.storage.db_path)
+    intel_svc = IntelligenceAppService(storage)
 
-    success = ioc_mgr.delete_ioc(args.ioc_id)
+    success, msg = intel_svc.delete_ioc(args.ioc_id)
     if success:
         print(f"✓ IOC '{args.ioc_id}' deleted.")
+        storage.close()
         return 0
     else:
         print(f"IOC '{args.ioc_id}' not found.")
+        storage.close()
         return 1
 
 
 def command_timeline(args: argparse.Namespace) -> int:
     """Reconstruct investigation timeline."""
     cfg = _get_config_from_args(args)
-    db_path = cfg.storage.db_path
-    storage = SQLiteStorage(db_path)
-    gen = TimelineGenerator(storage)
+    storage = SQLiteStorage(cfg.storage.db_path)
+    inc_svc = IncidentAppService(storage)
 
-    entries = gen.generate(source_ip=getattr(args, "ip", None), incident_id=getattr(args, "incident", None), limit=getattr(args, "limit", 50))
+    ip = getattr(args, "ip", None)
+    if not ip:
+        print("Please specify an IP with --ip")
+        storage.close()
+        return 1
+
+    entries = inc_svc.generate_timeline(ip)
     if not entries:
         print("No timeline entries found.")
+        storage.close()
         return 0
 
     print(f"{'TIMESTAMP':<20} {'TYPE':<18} {'SUMMARY'}")
@@ -1035,49 +1001,57 @@ def command_timeline(args: argparse.Namespace) -> int:
     for e in entries:
         ts_str = e.timestamp.strftime("%Y-%m-%d %H:%M:%S")
         print(f"{ts_str:<20} {e.entry_type.value:<18} {e.summary}")
+    storage.close()
     return 0
 
 
 def command_attack(args: argparse.Namespace) -> int:
     """View MITRE ATT&CK catalog."""
+    cfg = _get_config_from_args(args)
+    storage = SQLiteStorage(cfg.storage.db_path)
+    intel_svc = IntelligenceAppService(storage)
+
     if getattr(args, "technique_id", None):
-        tech = AttackRegistry.get_technique(args.technique_id)
+        tech = intel_svc.inspect_technique(args.technique_id)
         if not tech:
             print(f"Technique ID '{args.technique_id}' not found in catalog.")
+            storage.close()
             return 1
         print("=" * 64)
-        print(f" MITRE ATT&CK Technique: {tech.technique_id}")
+        print(f" MITRE ATT&CK Technique: {tech['technique_id']}")
         print("=" * 64)
-        print(f" Name        : {tech.name}")
-        print(f" Tactic      : {tech.tactic.value.upper()}")
-        print(f" Description : {tech.description}")
-        print(f" URL         : {tech.url}")
+        print(f" Name        : {tech['name']}")
+        print(f" Tactic      : {tech['tactic'].upper()}")
+        print(f" Description : {tech['description']}")
+        print(f" URL         : {tech['mitre_url']}")
         print("=" * 64)
+        storage.close()
         return 0
 
-    techniques = AttackRegistry.list_all_techniques()
+    catalog = intel_svc.get_attack_catalog()
     print("=" * 64)
     print(" MITRE ATT&CK Technique Catalog")
     print("=" * 64)
     print(f"{'ID':<12} {'TACTIC':<18} {'NAME'}")
     print("-" * 64)
-    for t in techniques:
-        print(f"{t.technique_id:<12} {t.tactic.value:<18} {t.name}")
+    for t in catalog:
+        print(f"{t['technique_id']:<12} {t['tactic']:<18} {t['name']}")
     print("=" * 64)
+    storage.close()
     return 0
 
 
 def command_events(args: argparse.Namespace) -> int:
     """List raw security events."""
     cfg = _get_config_from_args(args)
-    db_path = cfg.storage.db_path
-    storage = SQLiteStorage(db_path)
+    storage = SQLiteStorage(cfg.storage.db_path)
 
     ev_type = EventType(args.type.lower()) if getattr(args, "type", None) else None
     events = storage.get_events(source_ip=getattr(args, "ip", None), event_type=ev_type, limit=getattr(args, "limit", 50))
 
     if not events:
         print("No events found matching criteria.")
+        storage.close()
         return 0
 
     print(f"{'TIMESTAMP':<20} {'SOURCE IP':<18} {'TYPE':<22} {'USER'}")
@@ -1086,14 +1060,14 @@ def command_events(args: argparse.Namespace) -> int:
         ts_str = e.timestamp.strftime("%Y-%m-%d %H:%M:%S")
         user_str = e.username or "-"
         print(f"{ts_str:<20} {e.source_ip:<18} {e.event_type.value:<22} {user_str}")
+    storage.close()
     return 0
 
 
 def command_stats(args: argparse.Namespace) -> int:
     """Display aggregated threat intelligence metrics."""
     cfg = _get_config_from_args(args)
-    db_path = cfg.storage.db_path
-    storage = SQLiteStorage(db_path)
+    storage = SQLiteStorage(cfg.storage.db_path)
     stats = storage.get_stats()
 
     print("=" * 64)
@@ -1119,6 +1093,7 @@ def command_stats(args: argparse.Namespace) -> int:
         for a in stats["top_threat_actors"]:
             print(f"   • {a['source_ip']:<18} Score: {a['threat_score']:<3} ({a['severity'].upper()}) - {a['auth_failures']} failures")
     print("=" * 64)
+    storage.close()
     return 0
 
 
@@ -1151,8 +1126,11 @@ def command_config_show(args: argparse.Namespace) -> int:
 
 def command_parse(args: argparse.Namespace) -> int:
     """Parse log line."""
-    parser = SSHLogParser()
-    event = parser.parse(args.line)
+    from bastion.infrastructure.telemetry.adapters.ssh import SSHLogAdapter
+    adapter = SSHLogAdapter()
+    from bastion.core.models.telemetry import RawTelemetry
+    raw = RawTelemetry(raw_message=args.line, source="cli_test")
+    event = adapter.normalize(raw)
     if not event:
         print("Unrecognized log format.")
         return 1
@@ -1173,17 +1151,16 @@ def command_test_detection(args: argparse.Namespace) -> int:
             event_type=EventType.AUTH_FAILURE,
             username="root",
         )
-        res = detector.process(ev)
+        res = detector.evaluate(ev)
         status_str = "🚨 DETECTED!" if res.detected else "OK"
         print(f"Attempt {i:>2}/{args.attempts}: count={res.event_count} threshold={res.threshold} -> {status_str}")
     return 0
 
 
 def command_monitor(args: argparse.Namespace) -> int:
-    """Monitor telemetry stream."""
+    """Monitor telemetry stream via the Telemetry Gateway."""
     cfg = _get_config_from_args(args)
-    db_path = cfg.storage.db_path
-    storage = SQLiteStorage(db_path)
+    storage = SQLiteStorage(cfg.storage.db_path)
     fw = _get_firewall_backend(cfg, getattr(args, "backend", None))
 
     # Determine response mode
@@ -1223,24 +1200,19 @@ def command_monitor(args: argparse.Namespace) -> int:
     print(f"Response    : {mode.value.upper()}")
     print(f"Backend     : {fw.name.upper()}")
 
-    def line_stream() -> Iterator[str]:
-        if getattr(args, "stdin", False):
-            for line in sys.stdin:
-                yield line.strip()
-        elif getattr(args, "file", None):
-            with open(args.file, "r") as f:
-                for line in f:
-                    yield line.strip()
-        else:
-            collector = JournalCollector()
-            if getattr(args, "follow", False):
-                for line in collector.follow():
-                    yield line
-            else:
-                for line in collector.read(lines=getattr(args, "lines", 100)):
-                    yield line
+    collector: CollectorProvider
+    if getattr(args, "stdin", False):
+        collector = StdinCollector()
+    elif getattr(args, "file", None):
+        collector = FileCollector(args.file)
+    else:
+        collector = JournaldCollector()
 
-    for result in pipeline.process(line_stream()):
+    for result in pipeline.process(
+        collector.stream()
+        if getattr(args, "follow", False) or getattr(args, "stdin", False) or getattr(args, "file", None)
+        else collector.read(limit=getattr(args, "lines", 100))
+    ):
         if result.event:
             ts_str = result.event.timestamp.strftime("%Y-%m-%d %H:%M:%S")
             user_part = f" (user: {result.event.username})" if result.event.username else ""
@@ -1252,6 +1224,7 @@ def command_monitor(args: argparse.Namespace) -> int:
             print(result.alert_message)
             print("-" * 64)
 
+    storage.close()
     return 0
 
 

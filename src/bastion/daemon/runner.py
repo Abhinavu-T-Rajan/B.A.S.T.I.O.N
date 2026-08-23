@@ -13,9 +13,11 @@ from typing import Any
 
 from bastion.version import __version__
 from bastion.attack.registry import AttackRegistry
-from bastion.collector.journal import JournalCollector, JournalError
-from bastion.collector.ssh import SSHLogParser
 from bastion.config import BastionConfig, load_config, validate_config_strict
+from bastion.core.contracts.collector import CollectorProvider
+from bastion.core.contracts.firewall import FirewallProvider
+from bastion.core.contracts.storage import StorageProvider
+from bastion.core.models.telemetry import RawTelemetry
 from bastion.correlation.engine import CorrelationEngine
 from bastion.daemon.logging import (
     BAN_EXPIRED,
@@ -51,10 +53,14 @@ from bastion.firewall.base import FirewallBackend
 from bastion.firewall.mock import MockFirewallBackend
 from bastion.firewall.nftables import NFTablesBackend
 from bastion.incidents.manager import IncidentManager
+from bastion.infrastructure.telemetry.adapters.composite import CompositeEventNormalizer
+from bastion.infrastructure.telemetry.file import FileCollector
+from bastion.infrastructure.telemetry.journald import JournaldCollector, JournaldCollectorError
+from bastion.infrastructure.telemetry.stdin import StdinCollector
 from bastion.intelligence.manager import IOCManager
 from bastion.models.actors import ThreatActorProfile
 from bastion.models.events import SecurityEvent
-from bastion.pipeline import SentinelPipeline
+from bastion.services.pipeline import SentinelPipeline
 from bastion.response.ban_manager import BanManager
 from bastion.response.engine import ResponseEngine
 from bastion.response.models import ResponseMode
@@ -105,7 +111,7 @@ class BastionDaemon:
         self.ban_manager: BanManager | None = None
         self.reconciler: FirewallReconciler | None = None
         self.pipeline: SentinelPipeline | None = None
-        self.collector: JournalCollector | None = None
+        self.collector: CollectorProvider | None = None
 
         self._running = False
         self._stop_event = threading.Event()
@@ -312,44 +318,48 @@ class BastionDaemon:
         # 8. Setup Core Pipeline
         risk_engine = RiskEngine()
         self.pipeline = SentinelPipeline(
-            parser=SSHLogParser(),
+            normalizer=CompositeEventNormalizer(),
             engine=detection_engine,
             risk_engine=risk_engine,
             response_engine=response_engine,
             storage=self.storage,
-            ioc_manager=ioc_mgr,
-            incident_manager=inc_mgr,
             correlation_engine=corr_engine,
-            on_alert=self._on_pipeline_alert,
+            alert_min_score=self.config.response.isolation_threshold,
         )
 
         # 9. Setup Telemetry Collector
-        if not self._injected_stream:
-            if self.config.telemetry.source == "journald":
-                self.collector = JournalCollector(
-                    units=self.config.telemetry.journal_units,
-                    identifier=self.config.telemetry.journal_identifier,
-                )
-                if self.collector.is_available():
-                    self.health_tracker.set_subsystem_health(
-                        Subsystem.TELEMETRY,
-                        HealthStatus.HEALTHY,
-                        f"journald units: {self.config.telemetry.journal_units}",
-                    )
-                else:
-                    self.health_tracker.set_subsystem_health(
-                        Subsystem.TELEMETRY,
-                        HealthStatus.DEGRADED,
-                        "journalctl is not available on this host",
-                    )
-            else:
-                self.health_tracker.set_subsystem_health(
-                    Subsystem.TELEMETRY, HealthStatus.HEALTHY, f"Source: {self.config.telemetry.source}"
-                )
-        else:
+        if self._injected_stream is not None:
+            self.collector = StdinCollector(stream_source=self._injected_stream)
             self.health_tracker.set_subsystem_health(
                 Subsystem.TELEMETRY, HealthStatus.HEALTHY, "Stream: Custom stream"
             )
+        elif self.config.telemetry.source == "stdin":
+            self.collector = StdinCollector()
+            self.health_tracker.set_subsystem_health(
+                Subsystem.TELEMETRY, HealthStatus.HEALTHY, "Source: stdin"
+            )
+        elif self.config.telemetry.source == "file" and self.config.telemetry.log_file_path:
+            self.collector = FileCollector(file_path=self.config.telemetry.log_file_path)
+            self.health_tracker.set_subsystem_health(
+                Subsystem.TELEMETRY, HealthStatus.HEALTHY, f"Source: file ({self.config.telemetry.log_file_path})"
+            )
+        else:
+            self.collector = JournaldCollector(
+                units=self.config.telemetry.journal_units,
+                identifiers=self.config.telemetry.journal_identifier,
+            )
+            if self.collector.is_available():
+                self.health_tracker.set_subsystem_health(
+                    Subsystem.TELEMETRY,
+                    HealthStatus.HEALTHY,
+                    f"journald units: {self.config.telemetry.journal_units}",
+                )
+            else:
+                self.health_tracker.set_subsystem_health(
+                    Subsystem.TELEMETRY,
+                    HealthStatus.DEGRADED,
+                    "journalctl is not available on this host",
+                )
 
         # Save health snapshot
         self._export_health_snapshot()
@@ -488,13 +498,9 @@ class BastionDaemon:
         )
 
         try:
-            if self._injected_stream is not None:
-                self._process_stream(self._injected_stream)
-            elif self.config.telemetry.source == "stdin":
-                self._process_stream(sys.stdin)
-            elif self.config.telemetry.source == "file" and self.config.telemetry.log_file_path:
-                with open(os.path.expanduser(self.config.telemetry.log_file_path), "r", encoding="utf-8") as f:
-                    self._process_stream(f)
+            assert self.collector is not None
+            if self._injected_stream is not None or self.config.telemetry.source in {"stdin", "file"}:
+                self._process_stream(self.collector.stream())
             else:
                 self._run_journal_stream_loop()
         except KeyboardInterrupt:
@@ -504,26 +510,30 @@ class BastionDaemon:
 
         return 0
 
-    def _process_stream(self, stream: Iterable[str]) -> None:
-        """Process an iterable stream of raw log lines with error containment."""
+    def _process_stream(self, stream: Iterable[Any]) -> None:
+        """Process an iterable stream of raw telemetry items with error containment."""
         assert self.pipeline is not None
-        for raw_line in stream:
+        for item in stream:
             if self._stop_event.is_set() or not self._running:
                 break
-            line = raw_line.strip() if isinstance(raw_line, str) else str(raw_line).strip()
-            if not line:
-                continue
-
             try:
-                res = self.pipeline.process_line(line)
+                if isinstance(item, RawTelemetry):
+                    res = self.pipeline.process_raw(item)
+                else:
+                    line = item.strip() if isinstance(item, str) else str(item).strip()
+                    if not line:
+                        continue
+                    res = self.pipeline.process_line(line)
                 if res.event:
                     self.health_tracker.record_event_processed(res.event.timestamp)
+                if res.is_alert:
+                    self.health_tracker.record_detection()
             except Exception as exc:
                 self.health_tracker.record_subsystem_error(
                     Subsystem.DETECTION, f"Malformed event error: {exc}"
                 )
                 self.logger.warning(
-                    f"Error processing telemetry event: {exc} | raw_line='{line[:100]}...'"
+                    f"Error processing telemetry event: {exc}"
                 )
 
     def _run_journal_stream_loop(self) -> None:
@@ -535,23 +545,26 @@ class BastionDaemon:
                     Subsystem.TELEMETRY, HealthStatus.HEALTHY, "Streaming journald events"
                 )
                 self._consecutive_collector_errors = 0
-                for line in self.collector.follow(lines=20):
+                for item in self.collector.stream():
                     if self._stop_event.is_set() or not self._running:
                         break
-                    if not line:
-                        continue
                     try:
                         assert self.pipeline is not None
-                        res = self.pipeline.process_line(line)
+                        if isinstance(item, RawTelemetry):
+                            res = self.pipeline.process_raw(item)
+                        else:
+                            res = self.pipeline.process_line(str(item))
                         if res.event:
                             self.health_tracker.record_event_processed(res.event.timestamp)
+                        if res.is_alert:
+                            self.health_tracker.record_detection()
                     except Exception as exc:
                         self.health_tracker.record_subsystem_error(
                             Subsystem.DETECTION, f"Event processing error: {exc}"
                         )
                         self.logger.warning(f"Error handling log line: {exc}")
 
-            except (JournalError, Exception) as exc:
+            except (JournaldCollectorError, Exception) as exc:
                 if self._stop_event.is_set() or not self._running:
                     break
                 self._consecutive_collector_errors += 1
