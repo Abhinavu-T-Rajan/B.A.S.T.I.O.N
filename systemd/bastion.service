@@ -1,0 +1,32 @@
+[Unit]
+Description=B.A.S.T.I.O.N. Sentinel Core Security Service
+Documentation=https://github.com/Abhinavu-T-Rajan/B.A.S.T.I.O.N
+After=network.target systemd-journald.service
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/bastion daemon --config /etc/bastion/bastion.toml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+
+# Sandboxing and Least Privilege
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/bastion /var/log/bastion /run/bastion
+StateDirectory=bastion
+RuntimeDirectory=bastion
+LogsDirectory=bastion
+
+# Resource and Signal Constraints
+TimeoutStopSec=15s
+KillMode=mixed
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

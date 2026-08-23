@@ -10,10 +10,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Planned
-- **Systemd Daemon Service**: Native background service unit file and daemonized runner.
 - **Notification Webhooks**: Outbound alert dispatchers for Slack, Discord, and generic webhooks.
 - **Distributed Telemetry**: Multi-node agent-server log shipping and aggregated intelligence.
 - **REST / Web API**: Read-only threat telemetry inspection API.
+
+---
+
+## [0.3.0] — Sentinel Core (2026-08-23)
+
+> *"Sentinel sees. Aegis analyzes. Guardian protects. Oracle understands. Sentinel Core endures."*
+
+### Added
+- **Persistent Daemon Architecture (`src/bastion/daemon/`)**:
+  - `BastionDaemon`: Autonomous, long-running service orchestrator managing storage, telemetry ingestion, detection engine, risk engine, correlation engine, policy engine, ban manager, health tracking, and maintenance background workers.
+  - Background maintenance thread: Non-blocking periodic worker handling automated ban expiration polling (5s), firewall state reconciliation (default 60s), and atomic health snapshot dumping (default 30s).
+  - Graceful lifecycle management: Controlled transitions across `STARTING` $\rightarrow$ `INITIALIZING` $\rightarrow$ `RUNNING` $\rightarrow$ `STOPPING` $\rightarrow$ `STOPPED`, handling OS signals `SIGTERM`, `SIGINT`, and `SIGHUP`.
+- **Official systemd Integration (`bastion.service`)**:
+  - Production systemd unit file with security hardening and least-privilege sandboxing:
+    - Minimal Linux capabilities (`CAP_NET_ADMIN` for packet filtering).
+    - Hardened runtime boundaries: `NoNewPrivileges=true`, `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp=true`, `ProtectKernelTunables=true`, `ProtectControlGroups=true`, `RestrictSUIDSGID=true`.
+    - Dedicated state directory `/var/lib/bastion` with automatic ownership management.
+    - Automated recovery with `Restart=on-failure` and exponential backoff restart rate limiting.
+- **Subsystem Health Monitoring & Diagnostics (`HealthTracker`)**:
+  - Thread-safe operational health tracker monitoring 7 core subsystems: `Service`, `Telemetry`, `Detection`, `Threat Intel`, `Database`, `Firewall`, and `Response`.
+  - Atomic JSON health snapshot persistence (`/var/lib/bastion/health.json` or `~/.local/share/bastion/health.json`).
+  - Diagnostic probing capability evaluating subsystems even when the background daemon is not running.
+- **Configuration Validation & Versioning**:
+  - Schema versioning with `config_version = 1` distinguishing configuration file syntax from software and database migration versions.
+  - `validate_config` and `validate_config_strict` validators checking parameter bounds, positive detector thresholds, strictly increasing risk severity tiers, CIDR allowlist syntax, and ban duration hierarchies.
+- **Firewall State Reconciliation & Startup Ban Restoration (`FirewallReconciler`)**:
+  - Automatic synchronization and restoration of unexpired database bans into kernel firewall sets upon daemon startup.
+  - Periodic bidirectional reconciliation comparing SQLite active bans against live kernel packet filter rules, cleaning expired rules and restoring missing kernel elements with correct remaining TTL.
+  - Resilience against firewall transient unavailability.
+- **Structured Logging & Audit Logging**:
+  - Standardized structured log formatter with ISO-8601 timestamps, log levels, and auditable event tags (`SERVICE_START`, `SERVICE_STOP`, `CONFIG_LOAD`, `CONFIG_ERROR`, `COLLECTOR_FAILURE`, `DATABASE_FAILURE`, `FIREWALL_FAILURE`, `BAN_RESTORED`, `BAN_EXPIRED`, `RESPONSE_EXECUTED`, `RESPONSE_FAILED`, `DEGRADED_MODE`, `RECOVERY`).
+  - Automatic credential and sensitive token redaction (`sanitize_log_message`).
+- **New & Enhanced CLI Commands**:
+  - `bastion daemon` (aliases: `service`, `run`): Starts the persistent Sentinel Core daemon.
+  - `bastion health [--json]`: Inspects operational health diagnostics and error metrics.
+  - `bastion config validate`: Verifies syntax and configuration constraints with detailed error reporting.
+  - `bastion status`: Displays daemon runtime status and Sentinel Core system details.
+- **Comprehensive Documentation Suite**:
+  - Added `DEVELOPMENT.md`, `docs/development/setup.md`, `docs/development/testing.md`, `docs/operations/installation.md`, `docs/operations/service-management.md`, and `docs/operations/configuration.md`.
 
 ---
 
@@ -114,7 +152,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Journal Collector (`JournalCollector`)**:
   - `systemd-journald` streaming reader and live follower (`follow()`) for `ssh.service` and `sshd.service`.
 - **OpenSSH Parser (`SSHLogParser`)**:
-  - Robust regex parser for OpenSSH log formats (password failures, accepted public keys/passwords, invalid users, connection closed preauth, max attempts exceeded, IPv4/IPv6).
+  - Robust regex parser for OpenSSH log formats (password failures, accepted public keys/passwords, invalid users, connection drops, and max attempt violations across IPv4 and IPv6).
 - **Sentinel Pipeline (`SentinelPipeline`)**:
   - Real-time event streaming pipeline connecting telemetry ingestion, normalization, detection, and explainable alerting.
 - **CLI Commands**:
