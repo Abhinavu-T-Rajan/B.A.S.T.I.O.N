@@ -29,8 +29,8 @@ else
 fi
 
 # Version definitions
-BASTION_VERSION="0.3.1"
-BASTION_CODENAME="Sentinel Core"
+BASTION_VERSION="0.4.0"
+BASTION_CODENAME="Gateway"
 
 print_banner() {
     local title="${1:-Installer}"

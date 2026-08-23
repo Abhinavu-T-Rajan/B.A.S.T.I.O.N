@@ -112,3 +112,15 @@ class AttackRegistry:
                     seen.add(mapping.technique_id)
 
         return techniques
+
+    @classmethod
+    def load_default(cls) -> AttackRegistry:
+        """Return registry instance or class."""
+        return cls()
+
+    def get_technique_for_detector(self, detector_name: str) -> Optional[AttackTechnique]:
+        """Lookup technique for a given detector name."""
+        mapping = self.get_mapping(detector_name)
+        if mapping:
+            return self.get_technique(mapping.technique_id)
+        return None

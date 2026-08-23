@@ -78,6 +78,12 @@ class BanRecord:
             return False
         return datetime.now(timezone.utc) >= self.expires_at
 
+    @property
+    def duration_seconds(self) -> int | None:
+        if self.expires_at is None:
+            return None
+        return int((self.expires_at - self.created_at).total_seconds())
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "ban_id": self.ban_id,

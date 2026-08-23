@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Optional
 
+from bastion.core.contracts.storage import StorageProvider
 from bastion.incidents.models import Incident, IncidentStatus
 from bastion.intelligence.models import IOCRecord, IOCStatus, IOCType, Provenance
 from bastion.models.actors import (
@@ -24,7 +25,7 @@ from bastion.storage.migrations import MigrationRunner
 from bastion.timeline.models import TimelineEntry, TimelineEntryType
 
 
-class SQLiteStorage:
+class SQLiteStorage(StorageProvider):
     """Persistent SQLite storage engine for events, detections, threat profiles, bans, IOCs, and incidents."""
 
     def __init__(self, db_path: str = ":memory:") -> None:
@@ -418,11 +419,17 @@ class SQLiteStorage:
         self,
         status: BanStatus | None = None,
         limit: int = 50,
+        active_only: bool | None = None,
     ) -> list[BanRecord]:
         """List bans with optional status filtering."""
         with self._lock:
             cur = self._connection.cursor()
-            if status:
+            if active_only is True or status == BanStatus.ACTIVE:
+                cur.execute(
+                    "SELECT * FROM bans WHERE status = ? ORDER BY created_at DESC LIMIT ?",
+                    (BanStatus.ACTIVE.value, limit),
+                )
+            elif status:
                 cur.execute(
                     "SELECT * FROM bans WHERE status = ? ORDER BY created_at DESC LIMIT ?",
                     (status.value, limit),
@@ -557,10 +564,10 @@ class SQLiteStorage:
             return [self._row_to_ioc(r) for r in rows]
 
     def delete_ioc(self, ioc_id: str) -> bool:
-        """Delete an IOC record by ID."""
+        """Delete an IOC record by ID or exact value."""
         with self._lock, self._connection:
             cur = self._connection.cursor()
-            cur.execute("DELETE FROM iocs WHERE ioc_id = ?", (ioc_id,))
+            cur.execute("DELETE FROM iocs WHERE ioc_id = ? OR value = ?", (ioc_id, ioc_id))
             return cur.rowcount > 0
 
     # ---------------------------------------------------------

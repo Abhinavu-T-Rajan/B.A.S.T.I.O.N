@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bastion"
-version = "0.3.1"
-description = "Behavioral Attack Surveillance & Threat Isolation Operating Network (Sentinel Core)"
+version = "0.4.0"
+description = "Behavioral Attack Surveillance & Threat Isolation Operating Network (Gateway)"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.11"
