@@ -1,5 +1,8 @@
 # B.A.S.T.I.O.N. Configuration File
 # Behavioral Attack Surveillance & Threat Isolation Operating Network
+# v0.3.0 — Sentinel Core
+
+config_version = 1
 
 [storage]
 # Path to persistent SQLite database
@@ -74,3 +77,29 @@ allowlist_cidrs = [
 
 # Dedicated nftables table namespace
 table_name = "bastion"
+
+[telemetry]
+# Telemetry ingestion source: journald, file, stdin
+source = "journald"
+# systemd journal units to follow
+journal_units = ["ssh.service", "sshd.service"]
+# Syslog identifier filter
+journal_identifier = "sshd"
+# Optional log file path when source = "file"
+log_file_path = ""
+
+[daemon]
+# Periodic health check and snapshot export interval (seconds)
+health_check_interval_seconds = 30
+# Periodic firewall state reconciliation interval (seconds)
+reconciliation_interval_seconds = 60
+# Retry backoff for transient collector reconnection (seconds)
+journal_retry_backoff_seconds = 5
+# Maximum consecutive collector retries before marking telemetry degraded
+max_collector_retries = 10
+# Location of the runtime health state JSON snapshot
+health_state_path = "~/.local/share/bastion/health.json"
+# Logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+log_level = "INFO"
+# Logging format: text, json
+log_format = "text"

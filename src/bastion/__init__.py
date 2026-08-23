@@ -2,13 +2,54 @@
 
 from __future__ import annotations
 
+from bastion.version import __codename__, __version__
 from bastion.attack.models import AttackMapping, AttackTactic, AttackTechnique
 from bastion.attack.registry import AttackRegistry
 from bastion.collector.journal import JournalCollector, JournalError
 from bastion.collector.ssh import SSHLogParser
-from bastion.config import BastionConfig, load_config
+from bastion.config import (
+    BastionConfig,
+    ConfigValidationError,
+    DaemonConfig,
+    DetectorsConfig,
+    ResponseConfig,
+    RiskConfig,
+    StorageConfig,
+    TelemetryConfig,
+    load_config,
+    validate_config,
+    validate_config_strict,
+)
 from bastion.correlation.engine import CorrelationEngine
 from bastion.correlation.models import CorrelationContext
+from bastion.daemon.logging import (
+    BAN_EXPIRED,
+    BAN_RESTORED,
+    COLLECTOR_FAILURE,
+    CONFIG_ERROR,
+    CONFIG_LOAD,
+    DATABASE_FAILURE,
+    DEGRADED_MODE,
+    FIREWALL_FAILURE,
+    RECOVERY,
+    RESPONSE_EXECUTED,
+    RESPONSE_FAILED,
+    SERVICE_START,
+    SERVICE_STOP,
+    StructuredLogFormatter,
+    log_audit,
+    setup_daemon_logging,
+)
+from bastion.daemon.reconciliation import FirewallReconciler, ReconciliationReport
+from bastion.daemon.runner import BastionDaemon
+from bastion.daemon.state import (
+    DaemonHealthSnapshot,
+    HealthStatus,
+    HealthTracker,
+    ServiceState,
+    Subsystem,
+    SubsystemHealth,
+)
 from bastion.detection.brute_force import BruteForceDetector, DetectionResult
 from bastion.detection.burst import BurstDetector
 from bastion.detection.engine import DetectionEngine
@@ -49,28 +90,42 @@ from bastion.storage.sqlite import SQLiteStorage
 from bastion.timeline.generator import TimelineGenerator
 from bastion.timeline.models import TimelineEntry, TimelineEntryType
 
-__version__ = "0.2.0-alpha"
-
 __all__ = [
     "ActorState",
     "AttackMapping",
     "AttackRegistry",
     "AttackTactic",
     "AttackTechnique",
+    "BAN_EXPIRED",
+    "BAN_RESTORED",
     "BanManager",
     "BanRecord",
     "BanStatus",
     "BastionConfig",
+    "BastionDaemon",
     "BruteForceDetector",
     "BurstDetector",
+    "COLLECTOR_FAILURE",
+    "CONFIG_ERROR",
+    "CONFIG_LOAD",
+    "ConfigValidationError",
     "CorrelationContext",
     "CorrelationEngine",
+    "DATABASE_FAILURE",
+    "DEGRADED_MODE",
+    "DaemonConfig",
+    "DaemonHealthSnapshot",
     "DetectionEngine",
     "DetectionResult",
+    "DetectorsConfig",
     "EventType",
     "ExperimentalResponseCoordinator",
+    "FIREWALL_FAILURE",
     "FirewallBackend",
     "FirewallError",
+    "FirewallReconciler",
+    "HealthStatus",
+    "HealthTracker",
     "IOCManager",
     "IOCRecord",
     "IOCStatus",
@@ -89,28 +144,47 @@ __all__ = [
     "PolicyConfig",
     "PolicyEngine",
     "Provenance",
+    "RECOVERY",
+    "RESPONSE_EXECUTED",
+    "RESPONSE_FAILED",
+    "ReconciliationReport",
     "RecommendedAction",
     "ResponseAction",
     "ResponseAuditRecord",
+    "ResponseConfig",
     "ResponseDecision",
     "ResponseEngine",
     "ResponseMode",
     "ResponseResult",
+    "RiskConfig",
     "RiskEngine",
     "RiskScoringConfig",
+    "SERVICE_START",
+    "SERVICE_STOP",
     "SQLiteStorage",
     "SSHLogParser",
     "ScoreFactor",
     "SecurityEvent",
     "SentinelPipeline",
+    "ServiceState",
     "ServiceType",
     "Severity",
+    "StorageConfig",
+    "StructuredLogFormatter",
+    "Subsystem",
+    "SubsystemHealth",
+    "TelemetryConfig",
     "ThreatActorProfile",
     "TimelineEntry",
     "TimelineEntryType",
     "TimelineGenerator",
     "UsernameEnumerationDetector",
+    "__codename__",
     "__version__",
     "format_explainable_alert",
     "load_config",
+    "log_audit",
+    "setup_daemon_logging",
+    "validate_config",
+    "validate_config_strict",
 ]

@@ -88,6 +88,11 @@ class AttackRegistry:
         return list(cls.TECHNIQUES.values())
 
     @classmethod
+    def list_all_techniques(cls) -> List[AttackTechnique]:
+        """Alias for list_techniques()."""
+        return cls.list_techniques()
+
+    @classmethod
     def get_mapping(cls, detector_name: str) -> Optional[AttackMapping]:
         """Lookup ATT&CK mapping for a detector name."""
         return cls.DETECTOR_MAPPINGS.get(detector_name.strip().lower())

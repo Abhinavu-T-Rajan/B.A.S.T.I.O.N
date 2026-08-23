@@ -15,6 +15,19 @@ class TimelineGenerator:
     def __init__(self, storage: SQLiteStorage) -> None:
         self.storage = storage
 
+    def generate(
+        self,
+        source_ip: str | None = None,
+        incident_id: str | None = None,
+        limit: int = 100,
+    ) -> List[TimelineEntry]:
+        """Generate investigation timeline for an IP or incident."""
+        if incident_id:
+            return self.generate_for_incident(incident_id, limit=limit)
+        if source_ip:
+            return self.generate_for_ip(source_ip, limit=limit)
+        return []
+
     def generate_for_ip(self, source_ip: str, limit: int = 100) -> List[TimelineEntry]:
         """Build chronological investigation timeline for a specific IP address."""
         entries: List[TimelineEntry] = []

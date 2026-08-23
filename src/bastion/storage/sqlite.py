@@ -404,6 +404,16 @@ class SQLiteStorage:
                 return None
             return self._row_to_ban(row)
 
+    def get_ban(self, ban_id: str) -> BanRecord | None:
+        """Retrieve a ban record by its unique ban_id."""
+        with self._lock:
+            cur = self._connection.cursor()
+            cur.execute("SELECT * FROM bans WHERE ban_id = ? LIMIT 1", (ban_id,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            return self._row_to_ban(row)
+
     def list_bans(
         self,
         status: BanStatus | None = None,

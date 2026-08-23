@@ -15,7 +15,7 @@ def test_cli_version(capsys: pytest.CaptureFixture[str]) -> None:
         parser.parse_args(["--version"])
     assert exc.value.code == 0
     captured = capsys.readouterr()
-    assert "B.A.S.T.I.O.N. v0.2.0-alpha (Oracle)" in captured.out
+    assert "B.A.S.T.I.O.N. v0.3.0 (Sentinel Core)" in captured.out
 
 
 def test_cli_status(capsys: pytest.CaptureFixture[str]) -> None:
@@ -25,7 +25,7 @@ def test_cli_status(capsys: pytest.CaptureFixture[str]) -> None:
 
     assert ret == 0
     captured = capsys.readouterr()
-    assert "Status      : DEVELOPMENT (Oracle v0.2.0-alpha)" in captured.out
+    assert "Status      : DEVELOPMENT (Sentinel Core v0.3.0)" in captured.out
     assert "Mode        : INTRUSION PREVENTION & THREAT ISOLATION" in captured.out
 
 
