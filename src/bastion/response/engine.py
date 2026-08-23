@@ -55,15 +55,47 @@ class ResponseEngine:
         ban_record: BanRecord | None = None
 
         if mode == ResponseMode.AUTOMATIC:
-            ban_record = self.ban_manager.create_ban(
-                source_ip=profile.source_ip,
-                reason=decision.reason,
-                threat_score=decision.threat_score,
-                duration_seconds=decision.duration_seconds,
-                action=decision.action,
-                status=BanStatus.ACTIVE,
-            )
-            decision = replace(decision, executed=True)
+            if not self.ban_manager.firewall.is_available():
+                ban_record = self.ban_manager.create_ban(
+                    source_ip=profile.source_ip,
+                    reason=f"{decision.reason} [ENFORCEMENT REFUSED: Firewall unavailable]",
+                    threat_score=decision.threat_score,
+                    duration_seconds=decision.duration_seconds,
+                    action=decision.action,
+                    status=BanStatus.FAILED,
+                )
+                decision = replace(
+                    decision,
+                    executed=False,
+                    mode=ResponseMode.DISABLED,
+                    reason=f"{decision.reason} [ENFORCEMENT REFUSED: Firewall unavailable]",
+                )
+            else:
+                try:
+                    ban_record = self.ban_manager.create_ban(
+                        source_ip=profile.source_ip,
+                        reason=decision.reason,
+                        threat_score=decision.threat_score,
+                        duration_seconds=decision.duration_seconds,
+                        action=decision.action,
+                        status=BanStatus.ACTIVE,
+                    )
+                    decision = replace(decision, executed=True)
+                except Exception as exc:
+                    ban_record = self.ban_manager.create_ban(
+                        source_ip=profile.source_ip,
+                        reason=f"{decision.reason} [ENFORCEMENT FAILED: {exc}]",
+                        threat_score=decision.threat_score,
+                        duration_seconds=decision.duration_seconds,
+                        action=decision.action,
+                        status=BanStatus.FAILED,
+                    )
+                    decision = replace(
+                        decision,
+                        executed=False,
+                        mode=ResponseMode.DISABLED,
+                        reason=f"{decision.reason} [ENFORCEMENT FAILED: {exc}]",
+                    )
 
         elif mode == ResponseMode.DRY_RUN:
             ban_record = self.ban_manager.create_ban(

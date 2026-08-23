@@ -53,15 +53,18 @@ class BanManager:
             metadata=metadata or {},
         )
 
-        self.storage.save_ban(record)
-
         if status == BanStatus.ACTIVE:
-            self.firewall.block_ip(source_ip, duration_seconds)
+            if self.firewall.is_available():
+                self.firewall.block_ip(source_ip, duration_seconds)
+            else:
+                record.status = BanStatus.FAILED
+
+        self.storage.save_ban(record)
 
         # Update or create threat actor profile
         profile = self.storage.get_threat_actor(source_ip)
         if profile:
-            if status == BanStatus.ACTIVE:
+            if record.status == BanStatus.ACTIVE:
                 profile.state = ActorState.ISOLATED
             self.storage.upsert_threat_actor(profile)
         else:

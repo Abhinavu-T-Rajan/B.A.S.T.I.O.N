@@ -4,8 +4,8 @@
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Version: v0.3.0 (Sentinel Core)](https://img.shields.io/badge/version-0.3.0%20(Sentinel%20Core)-brightgreen.svg)]()
-[![Tests: 126 Passed](https://img.shields.io/badge/tests-126%20passed-brightgreen.svg)]()
+[![Version: v0.3.1 (Sentinel Core)](https://img.shields.io/badge/version-0.3.1%20(Sentinel%20Core)-brightgreen.svg)]()
+[![Tests: 140 Passed](https://img.shields.io/badge/tests-140%20passed-brightgreen.svg)]()
 
 > *"Sentinel sees. Aegis analyzes. Guardian protects. Oracle understands. Sentinel Core endures."*
 
@@ -16,7 +16,7 @@ B.A.S.T.I.O.N. is an autonomous, explainable host-level **Intrusion Detection, P
 ## Architecture Overview
 
 ```
-                         B.A.S.T.I.O.N. v0.3.0 (Sentinel Core)
+                         B.A.S.T.I.O.N. v0.3.1 (Sentinel Core)
                                            │
                      ┌─────────────────────▼─────────────────────┐
                      │          systemd Service Layer            │ (bastion.service, sandboxing,

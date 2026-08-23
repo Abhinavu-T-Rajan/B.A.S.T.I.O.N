@@ -351,11 +351,19 @@ class HealthTracker:
         ]
 
         for sub_name in order:
-            sub = snapshot.subsystems.get(sub_name)
-            st_val = sub.status.value if sub else HealthStatus.UNKNOWN.value
+            if sub_name == Subsystem.SERVICE.value:
+                st_val = snapshot.overall_health.value
+            else:
+                sub = snapshot.subsystems.get(sub_name)
+                st_val = sub.status.value if sub else HealthStatus.UNKNOWN.value
             lines.append(f"{sub_name:<14}: {st_val}")
 
-        lines.append(f"{'Response':<14}: {snapshot.response_mode.upper()}")
+        resp_mode_str = snapshot.response_mode.upper()
+        fw_sub = snapshot.subsystems.get(Subsystem.FIREWALL.value)
+        if resp_mode_str == "AUTOMATIC" and fw_sub and fw_sub.status in (HealthStatus.FAILED, HealthStatus.DEGRADED):
+            resp_mode_str = "DISABLED (Firewall unavailable)"
+
+        lines.append(f"{'Response':<14}: {resp_mode_str}")
         lines.append(f"{'Last Event':<14}: {last_ev_str}")
         lines.append(f"{'Uptime':<14}: {uptime_str}")
 

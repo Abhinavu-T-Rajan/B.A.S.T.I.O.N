@@ -12,6 +12,8 @@ from bastion.firewall.base import FirewallBackend, FirewallError
 class NFTablesBackend(FirewallBackend):
     """Linux nftables packet filtering backend operating in dedicated 'inet bastion' table."""
 
+    DEFAULT_PRIORITY = -100
+
     def __init__(self, *, table_name: str = "bastion") -> None:
         self.table_name = table_name
 
@@ -40,32 +42,93 @@ class NFTablesBackend(FirewallBackend):
             err_msg = exc.stderr.strip() or f"exit code {exc.returncode}"
             raise FirewallError(f"nftables command failed ({' '.join(cmd)}): {err_msg}") from exc
 
+    def _table_exists(self) -> bool:
+        """Check if table inet <table_name> exists."""
+        try:
+            res = self._run_cmd(["list", "table", "inet", self.table_name])
+            return res.returncode == 0
+        except FirewallError:
+            return False
+
+    def _get_table_listing(self) -> str:
+        """Return raw text listing of the table or empty string if not existing."""
+        try:
+            res = self._run_cmd(["list", "table", "inet", self.table_name])
+            return res.stdout
+        except FirewallError:
+            return ""
+
     def initialize(self) -> None:
-        """Create dedicated bastion table, sets with timeout flags, and early drop rules."""
+        """Create or safely reconcile dedicated bastion table, sets with timeout flags, and early drop rules."""
         if not self.is_available():
             raise FirewallError("nft utility is not installed on this system")
 
-        script = (
-            f"add table inet {self.table_name}\n"
-            f"add set inet {self.table_name} blacklist_v4 {{ type ipv4_addr; flags timeout; }}\n"
-            f"add set inet {self.table_name} blacklist_v6 {{ type ipv6_addr; flags timeout; }}\n"
-            f"add chain inet {self.table_name} input {{ type filter hook input priority -10; policy accept; }}\n"
-            f"add rule inet {self.table_name} input ip saddr @blacklist_v4 drop\n"
-            f"add rule inet {self.table_name} input ip6 saddr @blacklist_v6 drop\n"
-        )
-
-        try:
-            subprocess.run(
-                ["nft", "-f", "-"],
-                input=script,
-                text=True,
-                check=True,
-                capture_output=True,
+        if not self._table_exists():
+            # 1. Fresh system: initialize table, sets, chain, and drop rules in one batch
+            script = (
+                f"add table inet {self.table_name}\n"
+                f"add set inet {self.table_name} blacklist_v4 {{ type ipv4_addr; flags timeout; }}\n"
+                f"add set inet {self.table_name} blacklist_v6 {{ type ipv6_addr; flags timeout; }}\n"
+                f"add chain inet {self.table_name} input {{ type filter hook input priority {self.DEFAULT_PRIORITY}; policy accept; }}\n"
+                f"add rule inet {self.table_name} input ip saddr @blacklist_v4 drop\n"
+                f"add rule inet {self.table_name} input ip6 saddr @blacklist_v6 drop\n"
             )
-        except subprocess.CalledProcessError as exc:
-            raise FirewallError(
-                f"Failed to initialize nftables table '{self.table_name}': {exc.stderr.strip()}"
-            ) from exc
+            try:
+                subprocess.run(
+                    ["nft", "-f", "-"],
+                    input=script,
+                    text=True,
+                    check=True,
+                    capture_output=True,
+                )
+                return
+            except subprocess.CalledProcessError as exc:
+                raise FirewallError(
+                    f"Failed to initialize nftables table '{self.table_name}': {exc.stderr.strip()}"
+                ) from exc
+
+        # 2. Table already exists: inspect and reconcile incrementally without destructive re-declarations
+        table_content = self._get_table_listing()
+
+        commands: list[str] = []
+
+        # Reconcile sets
+        if "set blacklist_v4" not in table_content:
+            commands.append(f"add set inet {self.table_name} blacklist_v4 {{ type ipv4_addr; flags timeout; }}")
+        if "set blacklist_v6" not in table_content:
+            commands.append(f"add set inet {self.table_name} blacklist_v6 {{ type ipv6_addr; flags timeout; }}")
+
+        # Reconcile chain
+        if "chain input" not in table_content:
+            commands.append(f"add chain inet {self.table_name} input {{ type filter hook input priority {self.DEFAULT_PRIORITY}; policy accept; }}")
+        else:
+            # Verify compatible hook type if chain is present
+            if "hook input" not in table_content and "type filter" not in table_content:
+                raise FirewallError(
+                    f"Incompatible existing chain 'input' detected in table inet '{self.table_name}'. "
+                    f"Expected 'type filter hook input', but found incompatible declaration."
+                )
+
+        # Reconcile drop rules
+        if "@blacklist_v4 drop" not in table_content:
+            commands.append(f"add rule inet {self.table_name} input ip saddr @blacklist_v4 drop")
+        if "@blacklist_v6 drop" not in table_content:
+            commands.append(f"add rule inet {self.table_name} input ip6 saddr @blacklist_v6 drop")
+
+        if commands:
+            script = "\n".join(commands) + "\n"
+            try:
+                subprocess.run(
+                    ["nft", "-f", "-"],
+                    input=script,
+                    text=True,
+                    check=True,
+                    capture_output=True,
+                )
+            except subprocess.CalledProcessError as exc:
+                raise FirewallError(
+                    f"Failed to reconcile nftables table '{self.table_name}': {exc.stderr.strip()}"
+                ) from exc
 
     def _is_ipv6(self, ip: str) -> bool:
         try:

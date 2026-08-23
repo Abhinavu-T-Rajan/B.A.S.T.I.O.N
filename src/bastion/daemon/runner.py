@@ -166,14 +166,30 @@ class BastionDaemon:
                     f"Firewall '{self.firewall.name}' ready",
                 )
             else:
+                is_auto = self.config.response.mode.lower() == "automatic"
+                fw_status = HealthStatus.FAILED if is_auto else HealthStatus.DEGRADED
                 self.health_tracker.set_subsystem_health(
                     Subsystem.FIREWALL,
-                    HealthStatus.DEGRADED,
+                    fw_status,
                     f"Firewall '{self.firewall.name}' unavailable",
                 )
+                if is_auto:
+                    self.health_tracker.set_subsystem_health(
+                        Subsystem.RESPONSE,
+                        HealthStatus.DEGRADED,
+                        "Automatic enforcement disabled; firewall backend unavailable",
+                    )
+                    log_audit(
+                        self.logger,
+                        DEGRADED_MODE,
+                        "Automatic enforcement configured but firewall backend is unavailable; entering fail-safe mode",
+                        level=30,
+                    )
         except Exception as exc:
+            is_auto = self.config.response.mode.lower() == "automatic"
+            fw_status = HealthStatus.FAILED if is_auto else HealthStatus.DEGRADED
             self.health_tracker.set_subsystem_health(
-                Subsystem.FIREWALL, HealthStatus.DEGRADED, f"Firewall init warning: {exc}"
+                Subsystem.FIREWALL, fw_status, f"Firewall init warning: {exc}"
             )
             log_audit(
                 self.logger,
@@ -591,10 +607,18 @@ class BastionDaemon:
         self.health_tracker.set_service_state(ServiceState.STOPPING)
         log_audit(self.logger, SERVICE_STOP, "Stopping B.A.S.T.I.O.N. daemon service...")
 
-        if self._maintenance_thread and self._maintenance_thread.is_alive():
-            self._maintenance_thread.join(timeout=3.0)
+        # 1. Stop collector subprocess immediately to unblock streaming loop
+        if self.collector:
+            try:
+                self.collector.stop()
+            except Exception:
+                pass
 
-        # Close database connection
+        # 2. Join background maintenance worker
+        if self._maintenance_thread and self._maintenance_thread.is_alive():
+            self._maintenance_thread.join(timeout=2.0)
+
+        # 3. Close database connection
         if self.storage:
             try:
                 self.storage.close()

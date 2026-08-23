@@ -119,7 +119,7 @@ class TelemetryConfig:
     journal_units: list[str] = field(
         default_factory=lambda: ["ssh.service", "sshd.service"]
     )
-    journal_identifier: str | None = "sshd"
+    journal_identifier: str | list[str] | None = None
     log_file_path: str | None = None
 
 
@@ -423,7 +423,7 @@ def load_config(config_path: str | Path | None = None) -> BastionConfig:
     telemetry_cfg = TelemetryConfig(
         source=raw_telemetry.get("source", "journald"),
         journal_units=raw_telemetry.get("journal_units", ["ssh.service", "sshd.service"]),
-        journal_identifier=raw_telemetry.get("journal_identifier", "sshd"),
+        journal_identifier=raw_telemetry.get("journal_identifier", None),
         log_file_path=raw_telemetry.get("log_file_path", None),
     )
 

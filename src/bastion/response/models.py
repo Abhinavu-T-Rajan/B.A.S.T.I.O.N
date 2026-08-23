@@ -34,6 +34,7 @@ class BanStatus(StrEnum):
     UNBANNED = "unbanned"
     PENDING_APPROVAL = "pending_approval"
     DRY_RUN = "dry_run"
+    FAILED = "failed"
 
 
 @dataclass(frozen=True, slots=True)

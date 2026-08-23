@@ -29,7 +29,7 @@ else
 fi
 
 # Version definitions
-BASTION_VERSION="0.3.0"
+BASTION_VERSION="0.3.1"
 BASTION_CODENAME="Sentinel Core"
 
 print_banner() {

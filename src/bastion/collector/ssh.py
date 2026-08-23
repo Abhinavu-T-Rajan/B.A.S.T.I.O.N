@@ -14,7 +14,7 @@ from bastion.models.events import EventType, SecurityEvent, ServiceType
 SYSLOG_PREFIX_RE = re.compile(
     r"^(?:(?P<iso_ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2}))|"
     r"(?P<syslog_ts>[A-Z][a-z]{2}\s+\d+\s+\d{2}:\d{2}:\d{2}))?\s*"
-    r"(?:[\w.-]+\s+)?sshd(?:\[\d+\])?:\s*",
+    r"(?:[\w.-]+\s+)?(?:sshd|sshd-session|sshd-auth)(?:\[\d+\])?:\s*",
     re.IGNORECASE,
 )
 
@@ -54,7 +54,7 @@ CONNECTION_CLOSED_RE = re.compile(
 )
 
 PAM_AUTH_FAILURE_RE = re.compile(
-    r"^pam_unix\(sshd:auth\):\s+authentication\s+failure;\s+"
+    r"^pam_unix\((?:sshd|sshd-session|sshd-auth):auth\):\s+authentication\s+failure;\s+"
     r".*?\brhost=(?P<ip>\S+)(?:\s+user=(?P<username>\S+))?",
     re.IGNORECASE,
 )

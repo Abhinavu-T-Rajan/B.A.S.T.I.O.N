@@ -16,6 +16,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.1] — Sentinel Core Hotfix (2026-08-23)
+
+> *"Reliability in the breach. Precision in defense."*
+
+### Fixed
+- **OpenSSH `sshd-session` & Syslog Parsing**:
+  - Enhanced `SSHLogParser` prefix matching to capture modern OpenSSH session logs (`sshd-session[PID]: ...`, `sshd-auth[PID]: ...`) and syslog/ISO timestamps.
+  - Updated `PAM_AUTH_FAILURE_RE` to match `pam_unix(sshd-session:auth)` events.
+- **Journal Collector Unit & Multi-Identifier Streaming**:
+  - Configured `JournalCollector` to accept multiple identifiers (`["sshd", "sshd-session"]`) and default to service unit filtering (`ssh.service`, `sshd.service`), preventing dropped modern SSH telemetry or duplicate queries.
+- **CLI Stdin Stream & Event Output**:
+  - Resolved `monitor --stdin` regression by streaming every normalized `SecurityEvent` to stdout in real-time while formatting box alerts when threat scoring thresholds are exceeded.
+- **Idempotent NFTables Table & Chain Initialization**:
+  - Fixed `NFTablesBackend.initialize()` to safely inspect existing table, chain, and set definitions in `table inet bastion`.
+  - Reuses compatible chains without throwing declaration conflict errors; incrementally adds missing sets or drop rules; safely rejects incompatible external chains with descriptive errors without deleting unrelated firewall tables.
+- **Daemon Graceful Shutdown & Subprocess Reaping**:
+  - Implemented `JournalCollector.stop()` to cleanly terminate and wait for child `journalctl` processes upon receiving `SIGTERM` / `SIGINT`.
+  - Unblocks streaming loops immediately, terminating cleanly within systemd stop timeouts without requiring `SIGKILL`.
+- **Fail-Safe Response Enforcement & Real Dependency Health**:
+  - When `response.mode = automatic` is configured but the firewall backend is unavailable or fails, `ResponseEngine` refuses enforcement, logs `RESPONSE_FAILED`, marks ban records `FAILED`, and transitions health state to `DEGRADED` / `FAILED`.
+  - `HealthTracker.calculate_overall_health()` and CLI diagnostics accurately reflect firewall and dependency states, preventing false `Service: HEALTHY` reporting when critical subsystems are down.
+
+---
+
 ## [0.3.0] — Sentinel Core (2026-08-23)
 
 > *"Sentinel sees. Aegis analyzes. Guardian protects. Oracle understands. Sentinel Core endures."*

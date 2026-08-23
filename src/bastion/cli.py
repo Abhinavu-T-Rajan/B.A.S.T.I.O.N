@@ -541,6 +541,7 @@ def command_health(args: argparse.Namespace) -> int:
 
         # 2. Firewall check
         fw = _get_firewall_backend(cfg, getattr(args, "backend", None))
+        is_auto = cfg.response.mode.lower() == "automatic"
         if fw.is_available():
             tracker.set_subsystem_health(
                 Subsystem.FIREWALL,
@@ -548,18 +549,28 @@ def command_health(args: argparse.Namespace) -> int:
                 f"Backend '{fw.name}' available",
             )
         else:
+            fw_st = HealthStatus.FAILED if is_auto else HealthStatus.DEGRADED
             tracker.set_subsystem_health(
                 Subsystem.FIREWALL,
-                HealthStatus.DEGRADED,
+                fw_st,
                 f"Backend '{fw.name}' unavailable",
             )
 
-        # 3. Detection check
+        # 3. Detection & Response check
         val_errors = validate_config(cfg)
         if not val_errors:
             tracker.set_subsystem_health(Subsystem.DETECTION, HealthStatus.HEALTHY, "Detectors configured")
             tracker.set_subsystem_health(Subsystem.THREAT_INTEL, HealthStatus.HEALTHY, "Threat Intel ready")
-            tracker.set_subsystem_health(Subsystem.RESPONSE, HealthStatus.HEALTHY, f"Mode: {cfg.response.mode.upper()}")
+            if is_auto and not fw.is_available():
+                tracker.set_subsystem_health(
+                    Subsystem.RESPONSE,
+                    HealthStatus.DEGRADED,
+                    "Automatic enforcement disabled; firewall unavailable",
+                )
+            else:
+                tracker.set_subsystem_health(
+                    Subsystem.RESPONSE, HealthStatus.HEALTHY, f"Mode: {cfg.response.mode.upper()}"
+                )
         else:
             tracker.set_subsystem_health(Subsystem.DETECTION, HealthStatus.DEGRADED, "Config warnings")
 
@@ -656,9 +667,17 @@ def command_status(args: argparse.Namespace) -> int:
 
     snapshot = HealthTracker.load_from_file(cfg.daemon.health_state_path)
     if snapshot and snapshot.service_state == ServiceState.RUNNING:
-        status_line = f"RUNNING (Sentinel Core v{__version__})"
+        if snapshot.overall_health == HealthStatus.DEGRADED:
+            status_line = f"DEGRADED (Sentinel Core v{__version__})"
+        elif snapshot.overall_health == HealthStatus.FAILED:
+            status_line = f"FAILED (Sentinel Core v{__version__})"
+        else:
+            status_line = f"RUNNING (Sentinel Core v{__version__})"
     else:
-        status_line = f"DEVELOPMENT (Sentinel Core v{__version__})"
+        if cfg.response.mode.lower() == "automatic" and not fw.is_available():
+            status_line = f"DEGRADED (Sentinel Core v{__version__}) - Firewall unavailable"
+        else:
+            status_line = f"DEVELOPMENT (Sentinel Core v{__version__})"
 
     print("=" * 64)
     print(f" B.A.S.T.I.O.N. Host Defense Engine v{__version__} (Sentinel Core)")
@@ -1222,6 +1241,12 @@ def command_monitor(args: argparse.Namespace) -> int:
                     yield line
 
     for result in pipeline.process(line_stream()):
+        if result.event:
+            ts_str = result.event.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+            user_part = f" (user: {result.event.username})" if result.event.username else ""
+            score_part = f" | Threat Score: {result.profile.threat_score}/100" if result.profile else ""
+            print(f"[{ts_str}] {result.event.event_type.value.upper()} from {result.event.source_ip}{user_part}{score_part}")
+
         if result.is_alert and result.alert_message:
             print("-" * 64)
             print(result.alert_message)

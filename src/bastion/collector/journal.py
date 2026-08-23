@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import threading
 from collections.abc import Iterator
 from typing import Sequence
 
@@ -19,13 +20,27 @@ class JournalCollector:
         self,
         *,
         units: str | Sequence[str] = DEFAULT_UNITS,
-        identifier: str | None = None,
+        identifier: str | Sequence[str] | None = None,
     ) -> None:
         if isinstance(units, str):
             self.units = [units]
         else:
             self.units = list(units)
-        self.identifier = identifier
+
+        if isinstance(identifier, str):
+            self.identifiers = [identifier]
+        elif identifier is not None:
+            self.identifiers = list(identifier)
+        else:
+            self.identifiers = []
+
+        self._lock = threading.Lock()
+        self._active_proc: subprocess.Popen[str] | None = None
+
+    @property
+    def identifier(self) -> str | None:
+        """Backward-compatibility property returning first identifier or None."""
+        return self.identifiers[0] if self.identifiers else None
 
     @classmethod
     def is_available(cls) -> bool:
@@ -37,8 +52,8 @@ class JournalCollector:
         cmd = ["journalctl", "--no-pager", "--output=cat"]
         for unit in self.units:
             cmd.extend(["--unit", unit])
-        if self.identifier:
-            cmd.extend(["--identifier", self.identifier])
+        for ident in self.identifiers:
+            cmd.extend(["--identifier", ident])
         return cmd
 
     def read(
@@ -105,6 +120,9 @@ class JournalCollector:
                 bufsize=1,
             )
 
+            with self._lock:
+                self._active_proc = proc
+
             if proc.stdout is None:
                 raise JournalError("Failed to open journalctl standard output stream")
 
@@ -124,9 +142,29 @@ class JournalCollector:
                 raise
             raise JournalError(f"journal stream failed: {exc}") from exc
         finally:
+            with self._lock:
+                if self._active_proc is proc:
+                    self._active_proc = None
             if proc and proc.poll() is None:
                 proc.terminate()
                 try:
                     proc.wait(timeout=2)
                 except subprocess.TimeoutExpired:
                     proc.kill()
+
+    def stop(self) -> None:
+        """Cleanly terminate and wait for any running journalctl subprocess."""
+        with self._lock:
+            proc = self._active_proc
+            if proc and proc.poll() is None:
+                try:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=1)
+                except Exception:
+                    pass
+                finally:
+                    self._active_proc = None

@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from bastion.cli import build_parser
+from bastion.version import __version__
 
 
 def test_cli_version(capsys: pytest.CaptureFixture[str]) -> None:
@@ -15,7 +16,7 @@ def test_cli_version(capsys: pytest.CaptureFixture[str]) -> None:
         parser.parse_args(["--version"])
     assert exc.value.code == 0
     captured = capsys.readouterr()
-    assert "B.A.S.T.I.O.N. v0.3.0 (Sentinel Core)" in captured.out
+    assert f"B.A.S.T.I.O.N. v{__version__} (Sentinel Core)" in captured.out
 
 
 def test_cli_status(capsys: pytest.CaptureFixture[str]) -> None:
@@ -25,7 +26,7 @@ def test_cli_status(capsys: pytest.CaptureFixture[str]) -> None:
 
     assert ret == 0
     captured = capsys.readouterr()
-    assert "Status      : DEVELOPMENT (Sentinel Core v0.3.0)" in captured.out
+    assert f"Status      : DEVELOPMENT (Sentinel Core v{__version__})" in captured.out
     assert "Mode        : INTRUSION PREVENTION & THREAT ISOLATION" in captured.out
 
 
