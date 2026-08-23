@@ -94,6 +94,10 @@ class IOCManager:
         """Search IOC records by value, tag, or notes substring."""
         return self.storage.search_iocs(query=query, limit=limit)
 
+    def search_iocs(self, query: str, limit: int = 50) -> list[IOCRecord]:
+        """Alias for search()."""
+        return self.search(query=query, limit=limit)
+
     def match_event(self, event: SecurityEvent) -> list[IOCRecord]:
         """
         Correlate a SecurityEvent against active IOCs.
