@@ -47,7 +47,7 @@ def test_cli_manual_ban_and_unban_flow(tmp_path: Path, capsys: pytest.CaptureFix
     parser = build_parser()
 
     # 1. Ban IP
-    ban_args = parser.parse_args(["--db", db_file, "ban", "203.0.113.88", "--duration", "600"])
+    ban_args = parser.parse_args(["--db", db_file, "--backend", "mock", "ban", "203.0.113.88", "--duration", "600"])
     ret = ban_args.handler(ban_args)
     assert ret == 0
     captured = capsys.readouterr()
@@ -68,7 +68,7 @@ def test_cli_manual_ban_and_unban_flow(tmp_path: Path, capsys: pytest.CaptureFix
     assert "Active Ban ID" in captured.out
 
     # 4. Unban IP
-    unban_args = parser.parse_args(["--db", db_file, "unban", "203.0.113.88"])
+    unban_args = parser.parse_args(["--db", db_file, "--backend", "mock", "unban", "203.0.113.88"])
     ret = unban_args.handler(unban_args)
     assert ret == 0
     captured = capsys.readouterr()
